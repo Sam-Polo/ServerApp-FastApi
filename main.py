@@ -1,3 +1,7 @@
+from info_controller import router as info_router
+
+import os
+
 from typing import Annotated
 
 from sqlalchemy import select
@@ -7,8 +11,12 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from pydantic import BaseModel
 from fastapi import FastAPI, Depends
 
+
+os.environ["TZ"] = "Europe/Moscow"
+
 app = FastAPI()
 
+app.include_router(info_router)
 
 engine = create_async_engine('sqlite+aiosqlite:///database.db')
 
