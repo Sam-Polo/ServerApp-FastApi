@@ -1,6 +1,7 @@
 # auth_controller.py:
 from datetime import datetime, timedelta
 import re
+from typing import Annotated
 
 from fastapi import APIRouter, HTTPException, Depends, Body
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
@@ -8,15 +9,16 @@ from sqlalchemy import select, delete
 from sqlalchemy.ext.asyncio import AsyncSession
 import jwt
 from passlib.context import CryptContext
+from sqlalchemy.orm import selectinload
 
 from models import (RegisterRequestSchema, AuthRequestSchema,
                     RegisterResponseSchema, AuthResponseSchema,
                     UserModel, ActiveTokenModel, RevokedTokenModel,
-                    UserResponseSchema, RefreshTokenModel)
+                    UserResponseSchema, RefreshTokenModel, RoleModel)
 from db import SessionDep, get_session
 
 
-router = APIRouter(prefix='/auth', tags=["Авторизация"])
+router = APIRouter(prefix='/auth', tags=['Авторизация'])
 
 # настройка хеширования паролей
 pwd_context = CryptContext(schemes=['bcrypt'], deprecated='auto')
@@ -27,7 +29,7 @@ oauth2_scheme = OAuth2PasswordBearer(tokenUrl='/auth/login')
 # настройка JWT
 SECRET_KEY = 'secret-asf'  # секретный ключ
 ALGORITHM = 'HS256'
-ACCESS_TOKEN_EXPIRE_MINUTES = 2  # время жизни токена в минутах
+ACCESS_TOKEN_EXPIRE_MINUTES = 15  # время жизни токена в минутах
 REFRESH_TOKEN_EXPIRE_DAYS = 7    # время жизни токена обновления
 MAX_ACTIVE_TOKENS_PER_USER = 5  # макс. кол-во активных токенов
 
@@ -431,15 +433,14 @@ async def refresh_token(
 
 @router.get('/me', response_model=UserResponseSchema)
 async def get_my_info(
-        token: str = Depends(oauth2_scheme),
-        session: AsyncSession = Depends(get_session),
+    token: str = Depends(oauth2_scheme),
+    session: AsyncSession = Depends(get_session),
 ):
-    """
-    Маршрут для получения информации о пользователе
-    """
     payload = await verify_token(token, session)
-    user = await session.execute(select(UserModel).where(UserModel.username == payload['sub']))
-    user = user.scalar()
+    stmt = select(UserModel).where(UserModel.username == payload['sub']).options(
+        selectinload(UserModel.role)  # Загружаем связанную роль
+    )
+    user = (await session.execute(stmt)).scalar_one_or_none()
 
     if not user:
         raise HTTPException(status_code=404, detail='Пользователь не найден')
@@ -447,8 +448,8 @@ async def get_my_info(
         id=user.id,
         username=user.username,
         email=user.email,
-        birthday=user.birthday.strftime('%Y-%m-%d'),
-        role=user.role,
+        birthday=user.birthday,  # Оставляем как datetime, так как схема ожидает date
+        role_id=user.role_id  # Используем role_id вместо role.code
     )
 
 
@@ -476,3 +477,71 @@ async def change_password(
     await session.commit()
 
     return {'message': 'Пароль успешно изменен'}
+
+
+async def get_current_user(session: SessionDep, token: str = Depends(oauth2_scheme)) -> UserModel:
+    """
+    Получение текущего пользователя по токену
+    """
+    # проверяем валидность токена и получаем payload
+    payload = await verify_token(token, session)
+
+    # ищем пользователя по username из payload
+    stmt = select(UserModel).where(UserModel.username == payload['sub'])
+    user = (await session.execute(stmt)).scalar_one_or_none()
+    if not user:
+        raise HTTPException(
+            status_code=401,
+            detail='Пользователь не найден',
+            headers={'WWW-Authenticate': 'Bearer'}
+        )
+
+    # проверяем, что токен активен
+    stmt_token = select(ActiveTokenModel).where(ActiveTokenModel.token == token)
+    active_token = (await session.execute(stmt_token)).scalar_one_or_none()
+    if not active_token or active_token.expires_at < datetime.utcnow():
+        raise HTTPException(
+            status_code=401,
+            detail='Токен недействителен или истёк',
+            headers={'WWW-Authenticate': 'Bearer'}
+        )
+
+    return user
+
+
+async def check_permission(permission_code: str,
+                          session: SessionDep,
+                          current_user: UserModel = Depends(get_current_user)) -> UserModel:
+    """
+    Проверка наличия разрешения у текущего пользователя
+    """
+    if current_user.role_id is None:
+        raise HTTPException(status_code=403, detail='У пользователя нет роли')
+
+    # загружаем роль с её разрешениями
+    stmt = select(RoleModel).where(RoleModel.id == current_user.role_id).options(
+        selectinload(RoleModel.permissions)
+    )
+    result = await session.execute(stmt)
+    role = result.scalar_one_or_none()
+
+    if not role or role.deleted_at is not None:
+        raise HTTPException(status_code=403, detail='Роль не найдена или удалена')
+
+    # проверяем, есть ли нужное разрешение
+    has_permission = any(perm.code == permission_code for perm in role.permissions)
+    if not has_permission:
+        raise HTTPException(status_code=403, detail=f'Нет разрешения "{permission_code}"')
+
+    return current_user
+
+
+# исправленная фабрика зависимостей
+def require_permission(permission_code: str):
+    """
+    Создаёт зависимость для проверки конкретного разрешения
+    """
+    async def permission_dependency(session: SessionDep,
+                                    current_user: UserModel = Depends(get_current_user)):
+        return await check_permission(permission_code, session, current_user)
+    return permission_dependency
