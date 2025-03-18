@@ -1,12 +1,10 @@
 # auth_controller.py:
 from datetime import datetime, timedelta
 import re
-from typing import Annotated
 
 from fastapi import APIRouter, HTTPException, Depends, Body
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from sqlalchemy import select, delete
-from sqlalchemy.ext.asyncio import AsyncSession
 import jwt
 from passlib.context import CryptContext
 from sqlalchemy.orm import selectinload
@@ -15,7 +13,7 @@ from models import (RegisterRequestSchema, AuthRequestSchema,
                     RegisterResponseSchema, AuthResponseSchema,
                     UserModel, ActiveTokenModel, RevokedTokenModel,
                     UserResponseSchema, RefreshTokenModel, RoleModel)
-from db import SessionDep, get_session
+from db import SessionDep
 
 
 router = APIRouter(prefix='/auth', tags=['Авторизация'])
@@ -139,8 +137,8 @@ async def register(user_data: RegisterRequestSchema, session: SessionDep):
 
 @router.post('/login', response_model=AuthResponseSchema)
 async def login(
-    form_data: OAuth2PasswordRequestForm = Depends(),
-    session: AsyncSession = Depends(get_session),
+        session: SessionDep,
+        form_data: OAuth2PasswordRequestForm = Depends(),
 ):
     """
     Маршрут для авторизации пользователя
@@ -187,7 +185,7 @@ def create_access_token(data: dict):
     return encoded_jwt
 
 
-async def verify_token(token: str, session: AsyncSession = Depends(get_session)):
+async def verify_token(token: str, session: SessionDep):
     """
     Проверяет JWT-токен и возвращает его payload, если токен валиден.
     Также проверяет, не отозван ли токен.
@@ -275,20 +273,10 @@ async def add_refresh_token(user_id: int, token: str, session: SessionDep):
     await session.commit()
 
 
-async def cleanup_expired_tokens(session: SessionDep):
-    """
-    Удаляет истёкшие токены из таблицы active_tokens.
-    """
-    await session.execute(
-        delete(ActiveTokenModel).where(ActiveTokenModel.expires_at < datetime.utcnow())
-    )
-    await session.commit()
-
-
 @router.get('/tokens')
 async def get_active_tokens(
-    token: str = Depends(oauth2_scheme),
-    session: AsyncSession = Depends(get_session),
+        session: SessionDep,
+        token: str = Depends(oauth2_scheme),
 ):
     """
     Маршрут для получения списка активных токенов пользователя.
@@ -312,10 +300,20 @@ async def get_active_tokens(
     } for t in active_tokens]
 
 
+async def cleanup_expired_tokens(session: SessionDep):
+    """
+    Удаляет истёкшие токены из таблицы active_tokens.
+    """
+    await session.execute(
+        delete(ActiveTokenModel).where(ActiveTokenModel.expires_at < datetime.utcnow())
+    )
+    await session.commit()
+
+
 @router.post('/out')
 async def logout(
-    token: str = Depends(oauth2_scheme),  # Текущий токен пользователя
-    session: AsyncSession = Depends(get_session),     # Сессия базы данных
+        session: SessionDep,  # Сессия базы данных
+        token: str = Depends(oauth2_scheme),  # Текущий токен пользователя
 ):
     """
     Маршрут для разлогирования пользователя.
@@ -347,8 +345,8 @@ async def logout(
 
 @router.post('/out_all')
 async def revoke_all_tokens(
-    token: str = Depends(oauth2_scheme),
-    session: AsyncSession = Depends(get_session),
+        session: SessionDep,
+        token: str = Depends(oauth2_scheme),
 ):
     """
     Маршрут для отзыва всех активных токенов пользователя.
@@ -390,8 +388,8 @@ async def revoke_all_tokens(
 
 @router.post('/refresh', response_model=AuthResponseSchema)
 async def refresh_token(
-    refresh_token: str = Body(..., embed=True),  # принимаем токен обновления в запросе
-    session: AsyncSession = Depends(get_session),
+        session: SessionDep,
+        refresh_token: str = Body(..., embed=True),  # принимаем токен обновления в запросе
 ):
     """
     Маршрут для обновления access-токена с помощью refresh-токена
@@ -433,12 +431,12 @@ async def refresh_token(
 
 @router.get('/me', response_model=UserResponseSchema)
 async def get_my_info(
-    token: str = Depends(oauth2_scheme),
-    session: AsyncSession = Depends(get_session),
+        session: SessionDep,
+        token: str = Depends(oauth2_scheme),
 ):
     payload = await verify_token(token, session)
     stmt = select(UserModel).where(UserModel.username == payload['sub']).options(
-        selectinload(UserModel.role)  # Загружаем связанную роль
+        selectinload(UserModel.role)
     )
     user = (await session.execute(stmt)).scalar_one_or_none()
 
@@ -448,17 +446,17 @@ async def get_my_info(
         id=user.id,
         username=user.username,
         email=user.email,
-        birthday=user.birthday,  # Оставляем как datetime, так как схема ожидает date
-        role_id=user.role_id  # Используем role_id вместо role.code
+        birthday=user.birthday,
+        role_id=user.role_id
     )
 
 
 @router.post('/change_password')
 async def change_password(
-    old_password: str,
-    new_password: str,
-    token: str = Depends(oauth2_scheme),  # передаём `verify_token` без вызова
-    session: AsyncSession = Depends(get_session),  # используем AsyncSession напрямую
+        session: SessionDep,  
+        old_password: str,
+        new_password: str,
+        token: str = Depends(oauth2_scheme),  # передаём `verify_token`
 ):
     """
     Маршрут для смены пароля
@@ -479,7 +477,10 @@ async def change_password(
     return {'message': 'Пароль успешно изменен'}
 
 
-async def get_current_user(session: SessionDep, token: str = Depends(oauth2_scheme)) -> UserModel:
+async def get_current_user(
+        session: SessionDep, 
+        token: str = Depends(oauth2_scheme)
+) -> UserModel:
     """
     Получение текущего пользователя по токену
     """
@@ -509,9 +510,11 @@ async def get_current_user(session: SessionDep, token: str = Depends(oauth2_sche
     return user
 
 
-async def check_permission(permission_code: str,
-                          session: SessionDep,
-                          current_user: UserModel = Depends(get_current_user)) -> UserModel:
+async def check_permission(
+        permission_code: str,
+        session: SessionDep,
+        current_user: UserModel = Depends(get_current_user)
+) -> UserModel:
     """
     Проверка наличия разрешения у текущего пользователя
     """
