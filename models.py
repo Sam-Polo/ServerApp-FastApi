@@ -146,6 +146,28 @@ class AssignRoleRequestSchema(BaseModel):
     role_id: int
 
 
+class ChangeLogSchema(BaseModel):
+    id: int
+    entity_type: str
+    entity_id: int
+    operation: str
+    old_value: Optional[str] = None
+    new_value: Optional[str] = None
+    created_at: datetime
+    created_by: int
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class ChangeLogCollectionSchema(BaseModel):
+    logs: list[ChangeLogSchema]
+
+
+'''
+_____________DB TABLES_____________
+'''
+
+
 class UserModel(Base):
     __tablename__ = 'users'
 
@@ -238,3 +260,19 @@ class RolePermissionModel(Base):
 
     role_id: Mapped[int] = mapped_column(Integer, ForeignKey('roles.id'), primary_key=True)
     permission_id: Mapped[int] = mapped_column(Integer, ForeignKey('permissions.id'), primary_key=True)
+
+
+class ChangeLogModel(Base):
+    __tablename__ = 'change_logs'
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    entity_type: Mapped[str] = mapped_column(String, nullable=False)  # user / role / permission
+    entity_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    operation: Mapped[str] = mapped_column(String, nullable=False)   # create / update / delete
+    old_value: Mapped[Optional[str]] = mapped_column(String, nullable=True)  # до
+    new_value: Mapped[Optional[str]] = mapped_column(String, nullable=True)  # после
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
+    created_by: Mapped[int] = mapped_column(Integer, ForeignKey('users.id'), nullable=False)
+
+    def __repr__(self) -> str:
+        return f'<ChangeLogModel(id={self.id}, entity_type={self.entity_type!r}, operation={self.operation!r})>'

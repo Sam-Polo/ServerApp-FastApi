@@ -95,7 +95,8 @@ async def get_role(
     """
     Получение конкретной роли
     """
-    stmt = select(RoleModel).where(RoleModel.id == id, RoleModel.deleted_at.is_(None)).options(selectinload(RoleModel.permissions))
+    stmt = select(RoleModel).where(RoleModel.id == id,
+                                   RoleModel.deleted_at.is_(None)).options(selectinload(RoleModel.permissions))
     result = await session.execute(stmt)
     role = result.scalar_one_or_none()
     if not role:
@@ -452,7 +453,8 @@ async def assign_role_to_user(
         raise HTTPException(status_code=404, detail=f'Пользователь с ID {user_id} не найден')
 
     # проверяем существование роли
-    stmt_role = select(RoleModel).where(RoleModel.id == role_id, RoleModel.deleted_at.is_(None)).options(selectinload(RoleModel.permissions))
+    stmt_role = select(RoleModel).where(RoleModel.id == role_id,
+                                        RoleModel.deleted_at.is_(None)).options(selectinload(RoleModel.permissions))
     result_role = await session.execute(stmt_role)
     role = result_role.scalar_one_or_none()
     if not role:
@@ -499,7 +501,8 @@ async def get_user_role(
         return {'message': f'У пользователя с ID {id} нет назначенной роли'}
 
     # Получаем данные роли
-    stmt_role = select(RoleModel).where(RoleModel.id == user.role_id, RoleModel.deleted_at.is_(None)).options(selectinload(RoleModel.permissions))
+    stmt_role = select(RoleModel).where(RoleModel.id == user.role_id,
+                                        RoleModel.deleted_at.is_(None)).options(selectinload(RoleModel.permissions))
     result_role = await session.execute(stmt_role)
     role = result_role.scalar_one_or_none()
     if not role:
