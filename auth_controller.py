@@ -536,7 +536,7 @@ async def check_permission(permission_code: str,
     return current_user
 
 
-# исправленная фабрика зависимостей
+# фабрика зависимостей
 def require_permission(permission_code: str):
     """
     Создаёт зависимость для проверки конкретного разрешения
