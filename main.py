@@ -3,7 +3,7 @@ import asyncio
 
 from info_controller import router as info_router
 from auth_controller import router as auth_router, cleanup_expired_tokens
-from roles_controller import router as roles_router
+from roles_controller import roles_router, logs_router
 from seed import router as seed_router
 
 from db import new_session, router as db_router
@@ -21,6 +21,7 @@ app = FastAPI()
 app.include_router(info_router)
 app.include_router(auth_router)
 app.include_router(roles_router)
+app.include_router(logs_router)
 app.include_router(seed_router)
 app.include_router(db_router)
 

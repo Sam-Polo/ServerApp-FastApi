@@ -14,7 +14,7 @@ from models import (RegisterRequestSchema, AuthRequestSchema,
                     UserModel, ActiveTokenModel, RevokedTokenModel,
                     UserResponseSchema, RefreshTokenModel, RoleModel)
 from db import SessionDep
-
+from utils import log_mutation
 
 router = APIRouter(prefix='/auth', tags=['Авторизация'])
 
@@ -28,7 +28,7 @@ oauth2_scheme = OAuth2PasswordBearer(tokenUrl='/auth/login')
 SECRET_KEY = 'secret-asf'  # секретный ключ
 ALGORITHM = 'HS256'
 ACCESS_TOKEN_EXPIRE_MINUTES = 15  # время жизни токена в минутах
-REFRESH_TOKEN_EXPIRE_DAYS = 7    # время жизни токена обновления
+REFRESH_TOKEN_EXPIRE_DAYS = 7  # время жизни токена обновления
 MAX_ACTIVE_TOKENS_PER_USER = 5  # макс. кол-во активных токенов
 
 
@@ -76,61 +76,78 @@ def validate_password(password: str) -> bool:
 
 @router.post('/register', status_code=201, response_model=RegisterResponseSchema)
 async def register(user_data: RegisterRequestSchema, session: SessionDep):
-
     """
     Маршрут для регистрации пользователя.
     Принимает данные о пользователе и возвращает сообщение об успешной регистрации.
     """
+    async with session.begin():  # одна транзакция (автоматически коммитится при успешном выходе из блока)
 
-    # проверка username
-    if not validate_username(user_data.username):
-        raise HTTPException(
-            status_code=400,
-            detail='Имя пользователя должно содержать только латинские буквы, '
-                   'начинаться с большой буквы и иметь длину не менее 7 символов.'
+        # проверка username
+        if not validate_username(user_data.username):
+            raise HTTPException(
+                status_code=400,
+                detail='Имя пользователя должно содержать только латинские буквы, '
+                       'начинаться с большой буквы и иметь длину не менее 7 символов.'
+            )
+
+        # проверка email
+        if not validate_email(user_data.email):
+            raise HTTPException(
+                status_code=400,
+                detail='Некорректный формат email.'
+            )
+
+        # проверка password
+        if not validate_password(user_data.password):
+            raise HTTPException(
+                status_code=400,
+                detail='Пароль должен содержать минимум 8 символов, '
+                       'хотя бы одну цифру, один символ и буквы в верхнем и нижнем регистре.'
+            )
+
+        # проверка совпадения паролей
+        if user_data.password != user_data.c_password:
+            raise HTTPException(status_code=400,
+                                detail='Пароли не совпадают')
+
+        # проверка на существующего пользователя или email
+        existing_user = await session.execute(
+            select(UserModel).where(
+                (UserModel.username == user_data.username) | (UserModel.email == user_data.email)
+            )
         )
+        if existing_user.scalar():
+            raise HTTPException(status_code=400,
+                                detail='Пользователь с таким именем или email уже существует')
 
-    # проверка email
-    if not validate_email(user_data.email):
-        raise HTTPException(
-            status_code=400,
-            detail='Некорректный формат email.'
+        hashed_password = hash_password(user_data.password)  # хеширование пароля перед сохранением
+
+        #   добавление нового пользователя в БД
+        new_user = UserModel(
+            username=user_data.username,
+            email=user_data.email,
+            hashed_password=hashed_password,
+            birthday=user_data.birthday,
         )
+        session.add(new_user)
+        await session.flush()
 
-    # проверка password
-    if not validate_password(user_data.password):
-        raise HTTPException(
-            status_code=400,
-            detail='Пароль должен содержать минимум 8 символов, '
-                   'хотя бы одну цифру, один символ и буквы в верхнем и нижнем регистре.'
+        # логируем создание пользователя
+        new_value = {
+            'username': new_user.username,
+            'email': new_user.email,
+            'birthday': new_user.birthday.isoformat(),
+            'role_id': new_user.role_id,
+        }
+        await log_mutation(
+            session=session,
+            entity_type='user',
+            entity_id=new_user.id,
+            operation='create',
+            old_value=None,
+            new_value=new_value,
+            user_id=new_user.id,
         )
-
-    # проверка совпадения паролей
-    if user_data.password != user_data.c_password:
-        raise HTTPException(status_code=400,
-                            detail='Пароли не совпадают')
-
-    # проверка на существующего пользователя или email
-    existing_user = await session.execute(
-        select(UserModel).where(
-            (UserModel.username == user_data.username) | (UserModel.email == user_data.email)
-        )
-    )
-    if existing_user.scalar():
-        raise HTTPException(status_code=400,
-                            detail='Пользователь с таким именем или email уже существует')
-
-    hashed_password = hash_password(user_data.password)     # хеширование пароля перед сохранением
-
-    #   добавление нового пользователя в БД
-    new_user = UserModel(
-        username=user_data.username,
-        email=user_data.email,
-        hashed_password=hashed_password,
-        birthday=user_data.birthday,
-    )
-    session.add(new_user)
-    await session.commit()
 
     return user_data.to_response()
 
@@ -365,14 +382,14 @@ async def revoke_all_tokens(
     active_tokens = active_tokens.scalars().all()
     for t in active_tokens:
         session.add(RevokedTokenModel(
-               token=t.token,
-               expires_at=t.expires_at
+            token=t.token,
+            expires_at=t.expires_at
         ))
     await session.execute(delete(ActiveTokenModel).where(ActiveTokenModel.user_id == user.id))
 
     # отзываем все refresh-токены
     refresh_tokens = await session.execute(
-         select(RefreshTokenModel).where(RefreshTokenModel.user_id == user.id)
+        select(RefreshTokenModel).where(RefreshTokenModel.user_id == user.id)
     )
     refresh_tokens = refresh_tokens.scalars().all()
     for t in refresh_tokens:
@@ -453,7 +470,7 @@ async def get_my_info(
 
 @router.post('/change_password')
 async def change_password(
-        session: SessionDep,  
+        session: SessionDep,
         old_password: str,
         new_password: str,
         token: str = Depends(oauth2_scheme),  # передаём `verify_token`
@@ -478,7 +495,7 @@ async def change_password(
 
 
 async def get_current_user(
-        session: SessionDep, 
+        session: SessionDep,
         token: str = Depends(oauth2_scheme)
 ) -> UserModel:
     """
@@ -547,4 +564,5 @@ def require_permission(permission_code: str):
     async def permission_dependency(session: SessionDep,
                                     current_user: UserModel = Depends(get_current_user)):
         return await check_permission(permission_code, session, current_user)
+
     return permission_dependency

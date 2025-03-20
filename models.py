@@ -1,7 +1,8 @@
 # models.py:
 from datetime import datetime, date
-from typing import Optional
+from typing import Optional, Any
 
+import json
 from pydantic import BaseModel, ConfigDict
 import sqlalchemy
 from sqlalchemy import String, Integer, Date, ForeignKey, DateTime
@@ -155,8 +156,24 @@ class ChangeLogSchema(BaseModel):
     new_value: Optional[str] = None
     created_at: datetime
     created_by: int
+    diff: Optional[dict] = None
 
     model_config = ConfigDict(from_attributes=True)
+
+    @classmethod
+    def model_validate(cls, obj: Any, *, strict: bool | None = None, from_attributes: bool | None = None,
+                       context: dict[str, Any] | None = None):
+        # Вызываем базовый метод для создания экземпляра
+        instance = super().model_validate(obj, strict=strict, from_attributes=from_attributes, context=context)
+        # Вычисляем различия между old_value и new_value
+        old_dict = json.loads(instance.old_value) if instance.old_value else {}
+        new_dict = json.loads(instance.new_value) if instance.new_value else {}
+        instance.diff = {
+            key: {'old': old_dict.get(key), 'new': new_dict.get(key)}
+            for key in set(old_dict.keys()) | set(new_dict.keys())
+            if old_dict.get(key) != new_dict.get(key)
+        }
+        return instance
 
 
 class ChangeLogCollectionSchema(BaseModel):

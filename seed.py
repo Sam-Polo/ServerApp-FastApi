@@ -88,6 +88,7 @@ async def run_seed(session: SessionDep):
     permissions = [
         {'name': 'Просмотр роли пользователя', 'code': 'view-user-role', 'description': 'Разрешение на просмотр роли пользователя'},
         {'name': 'Назначение роли пользователю', 'code': 'assign-role', 'description': 'Разрешение на назначение роли пользователю'},
+        {'name': 'Восстановление из лога', 'code': 'restore-from-log', 'description': 'Разрешение на восстановление сущности из лога изменений'},
     ]
     for entity in entities:
         permissions.extend([
@@ -96,7 +97,8 @@ async def run_seed(session: SessionDep):
             {'name': f'Создание {entity}', 'code': f'create-{entity}', 'description': f'Разрешение на создание {entity}'},
             {'name': f'Обновление {entity}', 'code': f'update-{entity}', 'description': f'Разрешение на обновление {entity}'},
             {'name': f'Удаление {entity}', 'code': f'delete-{entity}', 'description': f'Разрешение на удаление {entity}'},
-            {'name': f'Восстановление {entity}', 'code': f'restore-{entity}', 'description': f'Разрешение на восстановление {entity}'}
+            {'name': f'Восстановление {entity}', 'code': f'restore-{entity}', 'description': f'Разрешение на восстановление {entity}'},
+            {'name': f'Просмотр истории {entity}', 'code': f'get-story-{entity}', 'description': f'Разрешение на просмотр истории изменений {entity}'},
         ])
 
     # добавляем разрешения
