@@ -33,7 +33,7 @@ async def create_role(request: CreateRoleRequestSchema,
     """
     Создание новой роли
     """
-    async with session.begin():
+    async with session.begin_nested():
 
         # проверяем, существует ли роль с таким кодом или именем
         stmt_code = select(RoleModel).where(RoleModel.code == request.code)
@@ -136,7 +136,7 @@ async def update_role(
     """
     Обновление роли
     """
-    async with session.begin():
+    async with session.begin_nested():
         # находим роль по id
         stmt = select(RoleModel).where(RoleModel.id == id, RoleModel.deleted_at.is_(None))
         result = await session.execute(stmt)
@@ -191,7 +191,7 @@ async def delete_role_hard(
     """
     Жёсткое удаление роли
     """
-    async with session.begin():
+    async with session.begin_nested():
         # находим роль
         stmt = select(RoleModel).where(RoleModel.id == id)
         result = await session.execute(stmt)
@@ -231,7 +231,7 @@ async def delete_role_soft(
     """
     Мягкое удаление роли
     """
-    async with session.begin():
+    async with session.begin_nested():
         # находим роль
         stmt = select(RoleModel).where(RoleModel.id == id,
                                        RoleModel.deleted_at.is_(None)).options(selectinload(RoleModel.permissions))
@@ -283,7 +283,7 @@ async def restore_role(
     """
     Восстановление мягко удалённой роли
     """
-    async with session.begin():
+    async with session.begin_nested():
 
         # Проверяем существование роли и её мягкое удаление
         stmt_role = select(RoleModel).where(
@@ -374,7 +374,7 @@ async def create_permission(
     """
     Создание нового разрешения
     """
-    async with session.begin():
+    async with session.begin_nested():
 
         # проверяем, существует ли разрешение с таким code или name
         stmt_code = select(PermissionModel).where(PermissionModel.code == request.code)
@@ -431,7 +431,7 @@ async def update_permission(
     """
     Обновление разрешения
     """
-    async with session.begin():
+    async with session.begin_nested():
 
         permission = await session.get(PermissionModel, id)
         if not permission:
@@ -479,7 +479,7 @@ async def delete_permission_hard(
     """
     Жёсткое удаление разрешения
     """
-    async with session.begin():
+    async with session.begin_nested():
         permission = await session.get(PermissionModel, id)
         if not permission:
             raise HTTPException(status_code=404, detail=f'Разрешение с ID {id} не найдено')
@@ -517,7 +517,7 @@ async def delete_permission_soft(
     """
     Мягкое удаление разрешения
     """
-    async with session.begin():
+    async with session.begin_nested():
         permission = await session.get(PermissionModel, id)
         if not permission:
             raise HTTPException(status_code=404, detail=f'Разрешение с ID {id} не найдено')
@@ -566,7 +566,7 @@ async def restore_permission(
     """
     Восстановление мягко удалённого разрешения
     """
-    async with session.begin():
+    async with session.begin_nested():
         stmt = select(PermissionModel).where(PermissionModel.id == id, PermissionModel.deleted_at.is_not(None))
         result = await session.execute(stmt)
         permission = result.scalar_one_or_none()
@@ -655,7 +655,7 @@ async def remove_role_from_user(
     """
     Удаление роли у пользователя
     """
-    async with session.begin():
+    async with session.begin_nested():
         stmt_user = select(UserModel).where(UserModel.id == id)
         result_user = await session.execute(stmt_user)
         user = result_user.scalar_one_or_none()
@@ -704,7 +704,7 @@ async def assign_role_to_user(
     """
     Назначение роли пользователю
     """
-    async with session.begin():
+    async with session.begin_nested():
         # Проверяем существование пользователя
         stmt_user = select(UserModel).where(UserModel.id == user_id)
         result_user = await session.execute(stmt_user)
@@ -855,7 +855,7 @@ async def restore_from_log(
     """
     Восстановление состояния сущности из записи в логе изменений
     """
-    async with session.begin():
+    async with session.begin_nested():
         # находим запись в логах по log_id
         stmt_log = select(ChangeLogModel).where(ChangeLogModel.id == log_id)
         result_log = await session.execute(stmt_log)
@@ -886,22 +886,29 @@ async def restore_from_log(
         result_entity = await session.execute(stmt_entity)
         entity = result_entity.scalar_one_or_none()
 
-        # если сущность удалена жёстко (нет в БД), создаём новую
-        if entity is None and log.operation != 'delete' and new_value:
-            entity = model(id=entity_id)  # создаём с тем же ID
-            session.add(entity)
-        elif entity is None:
-            raise HTTPException(status_code=404, detail=f'Сущность {entity_type} с ID {entity_id} не найдена и не может быть восстановлена')
+        # определяем restore_value в зависимости от операции
+        if log.operation == 'delete':
+            restore_value = old_value
+        elif log.operation == 'update':
+            restore_value = old_value
+        else:  # 'create' или 'restore'
+            restore_value = new_value
 
-        # восстанавливаем состояние из new_value (если это не удаление) или old_value (если удаление)
-        restore_value = new_value if log.operation != 'delete' else old_value
         if not restore_value:
             raise HTTPException(status_code=400, detail='Нет данных для восстановления')
 
-        # обновляем только поля, которые есть в restore_value
-        for key, value in restore_value.items():
-            if hasattr(entity, key):
-                setattr(entity, key, value)
+        # если сущность жёстко удалена, воссоздаём её
+        if entity is None:
+            entity = model(id=entity_id)
+            for key, value in restore_value.items():
+                if hasattr(entity, key):
+                    setattr(entity, key, value)
+            session.add(entity)
+        else:
+            # если сущность существует, обновляем её
+            for key, value in restore_value.items():
+                if hasattr(entity, key):
+                    setattr(entity, key, value)
 
         # сбрасываем deleted_at и deleted_by, если они есть
         if hasattr(entity, 'deleted_at'):
@@ -911,7 +918,7 @@ async def restore_from_log(
 
         # логируем восстановление
         old_state = {key: getattr(entity, key) for key in restore_value.keys() if hasattr(entity, key)}
-        await session.flush()  # обновляем состояние в БД, чтобы получить актуальные данные
+        await session.flush()
         new_state = {key: getattr(entity, key) for key in restore_value.keys() if hasattr(entity, key)}
 
         await log_mutation(
