@@ -1,3 +1,4 @@
+# seed.py:
 from fastapi import APIRouter
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
@@ -33,7 +34,7 @@ async def run_seed(session: SessionDep):
                 name=role_data['name'],
                 description=role_data['description'],
                 code=role_data['code'],
-                created_by=None,  # Пока нет админа, ставим None
+                created_by=None,  # пока нет админа, ставим None
                 created_at=datetime.utcnow()
             )
             session.add(role)
@@ -44,23 +45,29 @@ async def run_seed(session: SessionDep):
     user_role = (await session.execute(select(RoleModel).where(RoleModel.code == 'user'))).scalar_one()
     guest_role = (await session.execute(select(RoleModel).where(RoleModel.code == 'guest'))).scalar_one()
 
-    # пользователь Aleksandr (админ)
-    stmt_user = select(UserModel).where(UserModel.username == 'Aleksandr')
+    # пользователь Aleksandr (админ + пользователь))
+    stmt_user = select(UserModel).where(UserModel.username == 'Aleksandr').options(selectinload(UserModel.roles))
     result_user = await session.execute(stmt_user)
-    if not result_user.scalar_one_or_none():
+    user = result_user.scalar_one_or_none()
+    if not user:
         user = UserModel(
             username='Aleksandr',
             email='alex@mail.ru',
             hashed_password=hash_password('String1234!'),
             birthday=datetime.utcnow(),
-            role_id=admin_role.id  # Назначаем роль Admin сразу
         )
+        user.roles.extend([admin_role, user_role])  # назначаем Admin и User
         session.add(user)
         await session.commit()
         await session.refresh(user)
         admin_id = user.id
     else:
-        admin_id = (await session.execute(select(UserModel).where(UserModel.username == 'Aleksandr'))).scalar_one().id
+        admin_id = user.id
+        if admin_role not in user.roles:
+            user.roles.append(admin_role)
+        if user_role not in user.roles:
+            user.roles.append(user_role)
+        await session.commit()
 
     # обновляем created_by для ролей, теперь когда есть admin_id
     for role in [admin_role, user_role, guest_role]:
@@ -68,19 +75,26 @@ async def run_seed(session: SessionDep):
             role.created_by = admin_id
     await session.commit()
 
-    # пользователь Useruser (обычный пользователь)
-    stmt_useruser = select(UserModel).where(UserModel.username == 'Useruser')
-    result_useruser = await session.execute(stmt_useruser)
-    if not result_useruser.scalar_one_or_none():
-        useruser = UserModel(
-            username='Useruser',
-            email='useruser@mail.ru',
+    # пользователь User_user (обычный пользователь)
+    stmt_user_user = select(UserModel).where(UserModel.username == 'user_user').options(selectinload(UserModel.roles))
+    result_user_user = await session.execute(stmt_user_user)
+    user_user = result_user_user.scalar_one_or_none()
+
+    if not user_user:
+        user_user = UserModel(
+            username='User_user',
+            email='user_user@mail.ru',
             hashed_password=hash_password('String1234!'),
             birthday=datetime.utcnow(),
-            role_id=user_role.id  # Назначаем роль User сразу
         )
-        session.add(useruser)
-
+        user_user.roles.extend([user_role])  # назначаем User
+        session.add(user_user)
+    else:
+        if user_role not in user_user.roles:
+            user_user.roles.append(user_role)
+        if guest_role not in user_user.roles:
+            user_user.roles.append(guest_role)
+            
     await session.commit()
 
     # список разрешений
@@ -88,6 +102,7 @@ async def run_seed(session: SessionDep):
     permissions = [
         {'name': 'Просмотр роли пользователя', 'code': 'view-user-role', 'description': 'Разрешение на просмотр роли пользователя'},
         {'name': 'Назначение роли пользователю', 'code': 'assign-role', 'description': 'Разрешение на назначение роли пользователю'},
+        {'name': 'Назначение разрешения пользователю', 'code': 'assign-permission', 'description': 'Добавление разрешения к роли'},
     ]
     for entity in entities:
         permissions.extend([
@@ -126,4 +141,4 @@ async def run_seed(session: SessionDep):
 
     await session.commit()
 
-    return {'seeding-success': True}
+    return {'ok': True}

@@ -3,12 +3,10 @@ import hashlib
 import uuid
 from datetime import datetime, timedelta
 import re
-from typing import Annotated
 
 from fastapi import APIRouter, HTTPException, Depends, Body
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from sqlalchemy import select, delete
-from sqlalchemy.ext.asyncio import AsyncSession
 import jwt
 from passlib.context import CryptContext
 from sqlalchemy.orm import selectinload
@@ -445,7 +443,7 @@ async def get_my_info(session: SessionDep, token: str = Depends(oauth2_scheme)):
     """
     payload = await verify_token(token, session)
     stmt = select(UserModel).where(UserModel.username == payload['sub']).options(
-        selectinload(UserModel.role)  # Загружаем связанную роль
+        selectinload(UserModel.roles)  # загружаем связанные роли
     )
     user = (await session.execute(stmt)).scalar_one_or_none()
 
@@ -455,8 +453,8 @@ async def get_my_info(session: SessionDep, token: str = Depends(oauth2_scheme)):
         id=user.id,
         username=user.username,
         email=user.email,
-        birthday=user.birthday,  # Оставляем как datetime, так как схема ожидает date
-        role_id=user.role_id  # Используем role_id вместо role.code
+        birthday=user.birthday,
+        role_ids=[role.id for role in user.roles]
     )
 
 
@@ -493,8 +491,19 @@ async def get_current_user(session: SessionDep, token: str = Depends(oauth2_sche
     # проверяем валидность токена и получаем payload
     payload = await verify_token(token, session)
 
+    # извлекаем jti из payload
+    jti = payload.get('jti')
+    if not jti:
+        raise HTTPException(
+            status_code=401,
+            detail='Токен не содержит jti',
+            headers={'WWW-Authenticate': 'Bearer'}
+        )
+
     # ищем пользователя по username из payload
-    stmt = select(UserModel).where(UserModel.username == payload['sub'])
+    stmt = select(UserModel).where(UserModel.username == payload['sub']).options(
+        selectinload(UserModel.roles).selectinload(RoleModel.permissions)  # загружаем роли и разрешения
+    )
     user = (await session.execute(stmt)).scalar_one_or_none()
     if not user:
         raise HTTPException(
@@ -504,7 +513,7 @@ async def get_current_user(session: SessionDep, token: str = Depends(oauth2_sche
         )
 
     # проверяем, что токен активен
-    stmt_token = select(ActiveTokenModel).where(ActiveTokenModel.token == token)
+    stmt_token = select(ActiveTokenModel).where(ActiveTokenModel.jti == jti)
     active_token = (await session.execute(stmt_token)).scalar_one_or_none()
     if not active_token or active_token.expires_at < datetime.utcnow():
         raise HTTPException(
@@ -516,27 +525,32 @@ async def get_current_user(session: SessionDep, token: str = Depends(oauth2_sche
     return user
 
 
-async def check_permission(permission_code: str,
-                          session: SessionDep,
-                          current_user: UserModel = Depends(get_current_user)) -> UserModel:
+async def check_permission(
+        permission_code: str,
+        session: SessionDep,
+        current_user: UserModel = Depends(get_current_user)
+) -> UserModel:
     """
     Проверка наличия разрешения у текущего пользователя
     """
-    if current_user.role_id is None:
+    if not current_user.roles:
         raise HTTPException(status_code=403, detail='У пользователя нет роли')
 
     # загружаем роль с её разрешениями
-    stmt = select(RoleModel).where(RoleModel.id == current_user.role_id).options(
+    stmt = select(RoleModel).where(RoleModel.id.in_([role.id for role in current_user.roles])).options(
         selectinload(RoleModel.permissions)
     )
     result = await session.execute(stmt)
-    role = result.scalar_one_or_none()
+    roles = result.scalars().all()
 
-    if not role or role.deleted_at is not None:
-        raise HTTPException(status_code=403, detail='Роль не найдена или удалена')
+    if not roles:
+        raise HTTPException(status_code=403, detail='Роль не найдена')
 
-    # проверяем, есть ли нужное разрешение
-    has_permission = any(perm.code == permission_code for perm in role.permissions)
+    # проверяем, есть ли нужное разрешение хотя бы в одной роли
+    has_permission = any(
+        any(perm.code == permission_code for perm in role.permissions)
+        for role in current_user.roles if role.deleted_at is None
+    )
     if not has_permission:
         raise HTTPException(status_code=403, detail=f'Нет разрешения "{permission_code}"')
 

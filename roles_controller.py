@@ -18,10 +18,21 @@ router = APIRouter(tags=['Роли и Привилегии'])
 
 @router.get('/api/ref/user/', response_model=UserCollectionSchema)
 async def get_users(session: SessionDep):
-    stmt = select(UserModel)
+    stmt = select(UserModel).options(selectinload(UserModel.roles))
     result = await session.execute(stmt)
     users = result.scalars().all()
-    return UserCollectionSchema(users=[UserResponseSchema.model_validate(user) for user in users])
+    return UserCollectionSchema(
+        users=[
+            UserResponseSchema(
+                id=user.id,
+                username=user.username,
+                email=user.email,
+                birthday=user.birthday,
+                role_ids=[role.id for role in user.roles]  # извлекаем ID ролей
+            )
+            for user in users
+        ]
+    )
 
 
 @router.post('/api/ref/policy/role', response_model=RoleSchema)
@@ -287,19 +298,33 @@ async def create_permission(
     return request.to_response(permission)
 
 
-@router.put('/api/ref/policy/permission/{id}', response_model=PermissionSchema)
+@router.put('/api/ref/policy/permission/{permission_id}', response_model=PermissionSchema)
 async def update_permission(
         session: SessionDep,
-        id: int = Path(description='ID разрешения'),
+        permission_id: int = Path(description='ID разрешения'),
         request: CreatePermissionRequestSchema = Body(...),
         current_user: UserModel = Depends(require_permission('update-permission'))
 ):
     """
     Обновление разрешения
     """
-    permission = await session.get(PermissionModel, id)
+    stmt = select(PermissionModel).where(PermissionModel.id == permission_id)
+    result = await session.execute(stmt)
+    permission = result.scalar_one_or_none()
     if not permission:
         raise HTTPException(status_code=404, detail=f'Разрешение с ID {id} не найдено')
+
+    if request.code != permission.code:  # Проверяем только если code изменился
+        stmt_check = select(PermissionModel).where(
+            PermissionModel.code == request.code,
+            PermissionModel.id != permission_id  # Исключаем текущую запись
+        )
+        result_check = await session.execute(stmt_check)
+        if result_check.scalar_one_or_none():
+            raise HTTPException(
+                status_code=400,
+                detail=f'Разрешение с code="{request.code}" уже существует'
+            )
 
     permission.name = request.name
     permission.code = request.code
@@ -409,29 +434,37 @@ async def assign_permission_to_role(
     return RoleSchema.model_validate(role)
 
 
-@router.delete('/api/ref/user/{id}/role', response_model=dict)
+@router.delete('/api/ref/{user}/{role}', response_model=dict)
 async def remove_role_from_user(
     session: SessionDep,
-    id: int = Path(description='ID пользователя'),
+    user: int = Path(description='ID пользователя'),
+    role: int = Path(description='ID роли'),
     current_user: UserModel = Depends(require_permission('delete-user'))
 ):
     """
     Удаление роли у пользователя
     """
-    stmt_user = select(UserModel).where(UserModel.id == id)
+    stmt_user = select(UserModel).where(UserModel.id == user).options(selectinload(UserModel.roles))
     result_user = await session.execute(stmt_user)
-    user = result_user.scalar_one_or_none()
-    if not user:
-        raise HTTPException(status_code=404, detail=f'Пользователь с ID {id} не найден')
+    user_obj = result_user.scalar_one_or_none()
+    if not user_obj:
+        raise HTTPException(status_code=404, detail=f'Пользователь с ID {user} не найден')
 
-    if user.role_id is None:
-        raise HTTPException(status_code=400, detail='У пользователя нет роли для удаления')
+    # проверяем, есть ли роль у пользователя
+    role_to_remove = None
+    for user_role in user_obj.roles:
+        if user_role.id == role:
+            role_to_remove = user_role
+            break
 
-    user.role_id = None
+    if not role_to_remove:
+        raise HTTPException(status_code=400, detail=f'У пользователя нет роли с ID {role}')
+
+    user_obj.roles.remove(role_to_remove)
     await session.commit()
-    await session.refresh(user)
+    await session.refresh(user_obj)
 
-    return {'message': f'Роль удалена у пользователя с ID {id}'}
+    return {'message': f'Роль с ID {role} удалена у пользователя с ID {user}'}
 
 
 @router.put('/api/ref/user/{user_id}/role/{role_id}', response_model=RoleSchema)
@@ -445,21 +478,24 @@ async def assign_role_to_user(
     Назначение роли пользователю
     """
     # Проверяем существование пользователя
-    stmt_user = select(UserModel).where(UserModel.id == user_id)
+    stmt_user = select(UserModel).where(UserModel.id == user_id).options(selectinload(UserModel.roles))
     result_user = await session.execute(stmt_user)
     user = result_user.scalar_one_or_none()
     if not user:
         raise HTTPException(status_code=404, detail=f'Пользователь с ID {user_id} не найден')
 
     # проверяем существование роли
-    stmt_role = select(RoleModel).where(RoleModel.id == role_id, RoleModel.deleted_at.is_(None)).options(selectinload(RoleModel.permissions))
+    stmt_role = select(RoleModel).where(RoleModel.id == role_id, RoleModel.deleted_at.is_(None)).options(
+        selectinload(RoleModel.permissions)
+    )
     result_role = await session.execute(stmt_role)
     role = result_role.scalar_one_or_none()
     if not role:
         raise HTTPException(status_code=404, detail=f'Роль с ID {role_id} не найдена или удалена')
 
-    # назначаем роль пользователю
-    user.role_id = role_id
+    # добавляем роль, если её ещё нет
+    if role not in user.roles:
+        user.roles.append(role)
     await session.commit()
     await session.refresh(user)
     await session.refresh(role)
@@ -478,8 +514,8 @@ async def assign_role_to_user(
     )
 
 
-@router.get('/api/ref/user/{id}/role', response_model=RoleSchema | dict)
-async def get_user_role(
+@router.get('/api/ref/user/{id}/role', response_model=RoleCollectionSchema)
+async def get_user_roles(
     session: SessionDep,
     id: int = Path(description='ID пользователя'),
     current_user: UserModel = Depends(require_permission('view-user-role'))
@@ -487,33 +523,20 @@ async def get_user_role(
     """
     Получение текущей роли пользователя
     """
-    # Проверяем существование пользователя
-    stmt_user = select(UserModel).where(UserModel.id == id)
+    # проверяем существование пользователя
+    stmt_user = select(UserModel).where(UserModel.id == id).options(selectinload(UserModel.roles))
     result_user = await session.execute(stmt_user)
     user = result_user.scalar_one_or_none()
     if not user:
         raise HTTPException(status_code=404, detail=f'Пользователь с ID {id} не найден')
 
-    # Если роли нет, возвращаем сообщение
-    if user.role_id is None:
-        return {'message': f'У пользователя с ID {id} нет назначенной роли'}
+    # получаем данные ролей
+    stmt_roles = select(RoleModel).where(RoleModel.id.in_([role.id for role in user.roles])).options(
+        selectinload(RoleModel.permissions)
+    )
+    result_roles = await session.execute(stmt_roles)
+    roles = result_roles.scalars().all()
 
-    # Получаем данные роли
-    stmt_role = select(RoleModel).where(RoleModel.id == user.role_id, RoleModel.deleted_at.is_(None)).options(selectinload(RoleModel.permissions))
-    result_role = await session.execute(stmt_role)
-    role = result_role.scalar_one_or_none()
-    if not role:
-        raise HTTPException(status_code=404, detail=f'Роль с ID {user.role_id} не найдена или удалена')
-
-    # Возвращаем данные роли
-    return RoleSchema(
-        id=role.id,
-        name=role.name,
-        description=role.description,
-        code=role.code,
-        created_at=role.created_at,
-        created_by=role.created_by,
-        deleted_at=role.deleted_at,
-        deleted_by=role.deleted_by,
-        permissions=[PermissionSchema.model_validate(perm) for perm in role.permissions]
+    return RoleCollectionSchema(
+        roles=[RoleSchema.model_validate(role) for role in roles if role.deleted_at is None]
     )
