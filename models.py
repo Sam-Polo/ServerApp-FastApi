@@ -5,7 +5,7 @@ from typing import Optional, Any
 import json
 from pydantic import BaseModel, ConfigDict
 import sqlalchemy
-from sqlalchemy import String, Integer, Date, ForeignKey, DateTime
+from sqlalchemy import String, Integer, Date, ForeignKey, DateTime, Table, Column
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from db import Base
@@ -49,7 +49,7 @@ class RegisterRequestSchema(BaseModel):
 class AuthResponseSchema(BaseModel):
     access_token: str  # токен доступа
     refresh_token: str  # токен обновления
-    token_type: str    # тип токена (по умолчанию bearer)
+    token_type: str  # тип токена (по умолчанию bearer)
 
 
 class RegisterResponseSchema(BaseModel):
@@ -62,7 +62,7 @@ class UserResponseSchema(BaseModel):
     username: str
     email: str
     birthday: date
-    role_id: int | None = None
+    role_ids: list[int]
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -147,6 +147,7 @@ class AssignRoleRequestSchema(BaseModel):
     role_id: int
 
 
+<<<<<<< HEAD
 class ChangeLogSchema(BaseModel):
     id: int
     entity_type: str
@@ -183,6 +184,19 @@ class ChangeLogCollectionSchema(BaseModel):
 '''
 _____________DB TABLES_____________
 '''
+=======
+#####################################
+"""            DB TABLES          """
+#####################################
+
+
+user_roles = Table(
+    'user_roles',
+    Base.metadata,
+    Column('user_id', Integer, ForeignKey('users.id'), primary_key=True),
+    Column('role_id', Integer, ForeignKey('roles.id'), primary_key=True),
+)
+>>>>>>> lb3
 
 
 class UserModel(Base):
@@ -193,10 +207,9 @@ class UserModel(Base):
     email: Mapped[str] = mapped_column(String(64), unique=True)
     hashed_password: Mapped[str] = mapped_column(String(256), nullable=False)
     birthday: Mapped[datetime] = mapped_column(Date)
-    role_id: Mapped[int | None] = mapped_column(Integer, ForeignKey('roles.id', use_alter=True), nullable=True)  # связь с RoleModel
 
     # отношение к роли
-    role = relationship('RoleModel', back_populates='users', foreign_keys=[role_id])
+    roles = relationship('RoleModel', secondary=user_roles, back_populates='users')
 
     def __repr__(self) -> str:
         return f'<UserModel(id={self.id}, username={self.username!r})>'
@@ -207,7 +220,7 @@ class ActiveTokenModel(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     user_id: Mapped[int] = mapped_column(ForeignKey('users.id'), nullable=False)
-    token: Mapped[str] = mapped_column(String, unique=True, nullable=False)
+    jti: Mapped[str] = mapped_column(String, unique=True, nullable=False)
     created_at: Mapped[datetime] = mapped_column(default=datetime.utcnow)
     expires_at: Mapped[datetime] = mapped_column(nullable=False)
 
@@ -216,7 +229,7 @@ class RevokedTokenModel(Base):
     __tablename__ = 'revoked_tokens'
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    token: Mapped[str] = mapped_column(String, unique=True, nullable=False)
+    jti: Mapped[str] = mapped_column(String, unique=True, nullable=False)
     expires_at: Mapped[datetime] = mapped_column(nullable=False)
 
 
@@ -225,7 +238,7 @@ class RefreshTokenModel(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     user_id: Mapped[int] = mapped_column(ForeignKey('users.id'), nullable=False)
-    token: Mapped[str] = mapped_column(String, unique=True, nullable=False)
+    token_hash: Mapped[str] = mapped_column(String, unique=True, nullable=False)
     created_at: Mapped[datetime] = mapped_column(default=datetime.utcnow)
     expires_at: Mapped[datetime] = mapped_column(nullable=False)
 
@@ -242,7 +255,7 @@ class RoleModel(Base):
     deleted_at: Mapped[DateTime | None] = mapped_column(DateTime, nullable=True)
     deleted_by: Mapped[int | None] = mapped_column(Integer, ForeignKey('users.id', use_alter=True), nullable=True)
 
-    users = relationship('UserModel', back_populates='role', foreign_keys=[UserModel.role_id])
+    users = relationship('UserModel', secondary=user_roles, back_populates='roles')
     permissions = relationship('PermissionModel',
                                secondary='role_permissions',
                                back_populates='roles')
