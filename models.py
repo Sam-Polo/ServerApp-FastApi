@@ -31,9 +31,8 @@ class AuthRequestSchema(BaseModel):
     username: str
     password: str  # пароль пользователя
 
-    def to_response(self, token, ttype: str) -> 'AuthResponseSchema':
-        return AuthResponseSchema(access_token=token, token_type=ttype)
-
+    def to_response(self, token: str, refresh_token: str, ttype: str) -> 'AuthResponseSchema':
+        return AuthResponseSchema(access_token=token, refresh_token=refresh_token, token_type=ttype)
 
 class RegisterRequestSchema(BaseModel):
     username: str
@@ -103,7 +102,7 @@ class RoleSchema(BaseModel):
     code: str
     created_at: datetime
     created_by: int
-    deleted_at: Optional[datetime] = None
+    deleted_at: datetime | None = None
     deleted_by: Optional[int] = None
     permissions: list[PermissionSchema] = []
 
@@ -134,12 +133,13 @@ class UpdateRoleRequestSchema(BaseModel):
         return RoleSchema(
             id=role.id,
             name=self.name if self.name is not None else role.name,
-            description=self.description,
+            description=self.description if self.description is not None else role.description,
             code=self.code if self.code is not None else role.code,
             created_at=role.created_at,
             created_by=role.created_by,
             deleted_at=role.deleted_at,
-            deleted_by=role.deleted_by
+            deleted_by=role.deleted_by,
+            permissions=[PermissionSchema.model_validate(p) for p in role.permissions],
         )
 
 
@@ -147,7 +147,6 @@ class AssignRoleRequestSchema(BaseModel):
     role_id: int
 
 
-<<<<<<< HEAD
 class ChangeLogSchema(BaseModel):
     id: int
     entity_type: str
@@ -166,14 +165,18 @@ class ChangeLogSchema(BaseModel):
                        context: dict[str, Any] | None = None):
         # Вызываем базовый метод для создания экземпляра
         instance = super().model_validate(obj, strict=strict, from_attributes=from_attributes, context=context)
+
         # Вычисляем различия между old_value и new_value
-        old_dict = json.loads(instance.old_value) if instance.old_value else {}
-        new_dict = json.loads(instance.new_value) if instance.new_value else {}
-        instance.diff = {
-            key: {'old': old_dict.get(key), 'new': new_dict.get(key)}
-            for key in set(old_dict.keys()) | set(new_dict.keys())
-            if old_dict.get(key) != new_dict.get(key)
-        }
+        try:
+            old_dict = json.loads(instance.old_value) if instance.old_value else {}
+            new_dict = json.loads(instance.new_value) if instance.new_value else {}
+            instance.diff = {
+                key: {'old': old_dict.get(key), 'new': new_dict.get(key)}
+                for key in set(old_dict.keys()) | set(new_dict.keys())
+                if old_dict.get(key) != new_dict.get(key)
+            }
+        except json.JSONDecodeError:
+            instance.diff = None  # Если JSON невалиден, оставляем diff как None
         return instance
 
 
@@ -181,10 +184,6 @@ class ChangeLogCollectionSchema(BaseModel):
     logs: list[ChangeLogSchema]
 
 
-'''
-_____________DB TABLES_____________
-'''
-=======
 #####################################
 """            DB TABLES          """
 #####################################
@@ -196,7 +195,6 @@ user_roles = Table(
     Column('user_id', Integer, ForeignKey('users.id'), primary_key=True),
     Column('role_id', Integer, ForeignKey('roles.id'), primary_key=True),
 )
->>>>>>> lb3
 
 
 class UserModel(Base):
@@ -206,7 +204,7 @@ class UserModel(Base):
     username: Mapped[str] = mapped_column(String(32), unique=True)
     email: Mapped[str] = mapped_column(String(64), unique=True)
     hashed_password: Mapped[str] = mapped_column(String(256), nullable=False)
-    birthday: Mapped[datetime] = mapped_column(Date)
+    birthday: Mapped[date] = mapped_column(Date)
 
     # отношение к роли
     roles = relationship('RoleModel', secondary=user_roles, back_populates='users')

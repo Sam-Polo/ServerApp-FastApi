@@ -448,20 +448,20 @@ async def update_permission(
         permission = result.scalar_one_or_none()
 
         if not permission:
-            raise HTTPException(status_code=404, detail=f'Разрешение с ID {id} не найдено')
+            raise HTTPException(status_code=404, detail=f'Разрешение с ID {permission_id} не найдено')
 
         if request.code != permission.code:  # Проверяем только если code изменился
             stmt_check = select(PermissionModel).where(
                 PermissionModel.code == request.code,
-                PermissionModel.id != permission_id  # Исключаем текущую запись
+                PermissionModel.id != permission_id,   # Исключаем текущую запись
             )
+            result_check = await session.execute(stmt_check)
 
-        result_check = await session.execute(stmt_check)
-        if result_check.scalar_one_or_none():
-            raise HTTPException(
-                status_code=400,
-                detail=f'Разрешение с code="{request.code}" уже существует'
-            )
+            if result_check.scalar_one_or_none():
+                raise HTTPException(
+                    status_code=400,
+                    detail=f'Разрешение с code="{request.code}" уже существует'
+                )
 
         # старое состояние
         old_value = {
@@ -645,30 +645,47 @@ async def assign_permission_to_role(
     """
     Привязка разрешения к роли (доп функционал)
     """
-    # проверяем существование роли
-    role = await session.get(RoleModel, role_id)
-    if not role or role.deleted_at is not None:
-        raise HTTPException(status_code=404, detail=f'Роль с id {role_id} не найдена')
+    async with session.begin_nested():
+        # проверяем существование роли
+        role = await session.get(RoleModel, role_id)
+        if not role or role.deleted_at is not None:
+            raise HTTPException(status_code=404, detail=f'Роль с id {role_id} не найдена')
 
-    # проверяем существование разрешения
-    permission = await session.get(PermissionModel, permission_id)
-    if not permission:
-        raise HTTPException(status_code=404, detail=f'Разрешение с id {permission_id} не найдено')
+        # проверяем существование разрешения
+        permission = await session.get(PermissionModel, permission_id)
+        if not permission:
+            raise HTTPException(status_code=404, detail=f'Разрешение с id {permission_id} не найдено')
 
-    # проверяем, не привязано ли уже разрешение к роли
-    stmt = select(RolePermissionModel).where(
-        RolePermissionModel.role_id == role_id,
-        RolePermissionModel.permission_id == permission_id
-    )
-    result = await session.execute(stmt)
-    if result.scalar_one_or_none():
-        raise HTTPException(status_code=400, detail=f'Разрешение уже привязано к роли')
+        # проверяем, не привязано ли уже разрешение к роли
+        stmt = select(RolePermissionModel).where(
+            RolePermissionModel.role_id == role_id,
+            RolePermissionModel.permission_id == permission_id
+        )
+        result = await session.execute(stmt)
+        if result.scalar_one_or_none():
+            raise HTTPException(status_code=400, detail=f'Разрешение уже привязано к роли')
 
-    # привязываем разрешение к роли
-    role_permission = RolePermissionModel(role_id=role_id, permission_id=permission_id)
-    session.add(role_permission)
-    await session.commit()
-    await session.refresh(role)
+        role_permission = RolePermissionModel(role_id=role_id, permission_id=permission_id)
+        session.add(role_permission)
+        await session.flush()
+
+        old_value = {'permissions': [p.id for p in role.permissions]}
+
+        # привязываем разрешение к роли
+        role.permissions.append(permission)
+
+        new_value = {'permissions': [p.id for p in role.permissions]}
+
+        await log_mutation(
+            session=session,
+            entity_type='role',
+            entity_id=role_id,
+            operation='update',
+            old_value=old_value,
+            new_value=new_value,
+            user_id=current_user.id,
+        )
+
     return RoleSchema.model_validate(role)
 
 
@@ -804,8 +821,8 @@ async def get_user_role(
         raise HTTPException(status_code=404, detail=f'Пользователь с ID {id} не найден')
 
     # Если роли нет, возвращаем сообщение
-    if user.role_id is None:
-        return {'message': f'У пользователя с ID {id} нет назначенной роли'}
+    if not user.roles:
+        return RoleCollectionSchema(roles=[])
 
     stmt_roles = select(RoleModel).where(RoleModel.id.in_([role.id for role in user.roles])).options(
         selectinload(RoleModel.permissions))

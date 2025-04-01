@@ -272,7 +272,6 @@ async def add_active_token(user_id: int, jti: str, session: SessionDep):
         oldest_token = active_tokens[0]
         await session.delete(oldest_token)
         await session.flush()
-        await session.commit()
 
     # Добавляем новый токен
     new_token = ActiveTokenModel(
@@ -282,7 +281,7 @@ async def add_active_token(user_id: int, jti: str, session: SessionDep):
         expires_at=datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
     )
     session.add(new_token)
-    await session.commit()
+    await session.flush()
 
 
 async def add_refresh_token(user_id: int, token: str, session: SessionDep):
@@ -298,10 +297,9 @@ async def add_refresh_token(user_id: int, token: str, session: SessionDep):
         expires_at=datetime.utcnow() + timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS)
     )
     session.add(new_token)
-    await session.commit()
+    await session.flush()
 
 
-<<<<<<< HEAD
 @router.get('/tokens')
 async def get_active_tokens(session: SessionDep, token: str = Depends(oauth2_scheme)):
     """
@@ -557,16 +555,6 @@ async def check_permission(
     """
     if not current_user.roles:
         raise HTTPException(status_code=403, detail='У пользователя нет роли')
-
-    # загружаем роль с её разрешениями
-    stmt = select(RoleModel).where(RoleModel.id.in_([role.id for role in current_user.roles])).options(
-        selectinload(RoleModel.permissions)
-    )
-    result = await session.execute(stmt)
-    roles = result.scalars().all()
-
-    if not roles:
-        raise HTTPException(status_code=403, detail='Роль не найдена')
 
     # проверяем, есть ли нужное разрешение хотя бы в одной роли
     has_permission = any(

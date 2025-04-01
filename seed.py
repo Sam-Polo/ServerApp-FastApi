@@ -8,7 +8,6 @@ from models import RoleModel, PermissionModel, UserModel
 from db import setup_database, SessionDep
 from datetime import datetime
 
-
 router = APIRouter(tags=['База данных'])
 
 
@@ -94,29 +93,32 @@ async def run_seed(session: SessionDep):
             user_user.roles.append(user_role)
         if guest_role not in user_user.roles:
             user_user.roles.append(guest_role)
-            
+
     await session.commit()
 
     # список разрешений
     entities = ['user', 'role', 'permission']
     permissions = [
-        {'name': 'Просмотр роли пользователя', 'code': 'view-user-role', 'description': 'Разрешение на просмотр роли пользователя'},
-        {'name': 'Назначение роли пользователю', 'code': 'assign-role', 'description': 'Разрешение на назначение роли пользователю'},
-<<<<<<< HEAD
-        {'name': 'Восстановление из лога', 'code': 'restore-from-log', 'description': 'Разрешение на восстановление сущности из лога изменений'},
-=======
-        {'name': 'Назначение разрешения пользователю', 'code': 'assign-permission', 'description': 'Добавление разрешения к роли'},
->>>>>>> lb3
+        {'name': 'Просмотр роли пользователя', 'code': 'view-user-role',
+         'description': 'Разрешение на просмотр роли пользователя'},
+        {'name': 'Назначение роли пользователю', 'code': 'assign-role',
+         'description': 'Разрешение на назначение роли пользователю'},
+        {'name': 'Назначение разрешения пользователю', 'code': 'assign-permission',
+         'description': 'Добавление разрешения к роли'},
     ]
     for entity in entities:
         permissions.extend([
-            {'name': f'Получение списка {entity}', 'code': f'get-list-{entity}', 'description': f'Разрешение на получение списка {entity}'},
+            {'name': f'Получение списка {entity}', 'code': f'get-list-{entity}',
+             'description': f'Разрешение на получение списка {entity}'},
             {'name': f'Чтение {entity}', 'code': f'read-{entity}', 'description': f'Разрешение на чтение {entity}'},
-            {'name': f'Создание {entity}', 'code': f'create-{entity}', 'description': f'Разрешение на создание {entity}'},
-            {'name': f'Обновление {entity}', 'code': f'update-{entity}', 'description': f'Разрешение на обновление {entity}'},
-            {'name': f'Удаление {entity}', 'code': f'delete-{entity}', 'description': f'Разрешение на удаление {entity}'},
-            {'name': f'Восстановление {entity}', 'code': f'restore-{entity}', 'description': f'Разрешение на восстановление {entity}'},
-            {'name': f'Просмотр истории {entity}', 'code': f'get-story-{entity}', 'description': f'Разрешение на просмотр истории изменений {entity}'},
+            {'name': f'Создание {entity}', 'code': f'create-{entity}',
+             'description': f'Разрешение на создание {entity}'},
+            {'name': f'Обновление {entity}', 'code': f'update-{entity}',
+             'description': f'Разрешение на обновление {entity}'},
+            {'name': f'Удаление {entity}', 'code': f'delete-{entity}',
+             'description': f'Разрешение на удаление {entity}'},
+            {'name': f'Восстановление {entity}', 'code': f'restore-{entity}',
+             'description': f'Разрешение на восстановление {entity}'}
         ])
 
     # добавляем разрешения
