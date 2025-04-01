@@ -29,7 +29,7 @@ oauth2_scheme = OAuth2PasswordBearer(tokenUrl='/auth/login')
 # настройка JWT
 SECRET_KEY = 'secret-asf'  # секретный ключ
 ALGORITHM = 'HS256'
-ACCESS_TOKEN_EXPIRE_MINUTES = 2  # время жизни токена в минутах
+ACCESS_TOKEN_EXPIRE_MINUTES = 15  # время жизни токена в минутах
 REFRESH_TOKEN_EXPIRE_DAYS = 7    # время жизни токена обновления
 MAX_ACTIVE_TOKENS_PER_USER = 5  # макс. кол-во активных токенов
 
@@ -83,6 +83,7 @@ async def register(user_data: RegisterRequestSchema, session: SessionDep):
     Маршрут для регистрации пользователя.
     Принимает данные о пользователе и возвращает сообщение об успешной регистрации.
     """
+    user_data.email = user_data.email.lower()
 
     # проверка username
     if not validate_username(user_data.username):
@@ -138,10 +139,7 @@ async def register(user_data: RegisterRequestSchema, session: SessionDep):
 
 
 @router.post('/login', response_model=AuthResponseSchema)
-async def login(
-        session: SessionDep,
-        form_data: OAuth2PasswordRequestForm = Depends(),
-):
+async def login(session: SessionDep, form_data: OAuth2PasswordRequestForm = Depends()):
     """
     Маршрут для авторизации пользователя
     принимает логин и пароль, возвращает jwt-токен
@@ -187,7 +185,7 @@ def create_access_token(data: dict) -> tuple[str, str]:
     return encoded_jwt, jti
 
 
-async def verify_token(token: str, session: AsyncSession = Depends(get_session)):
+async def verify_token(token: str, session: SessionDep):
     """
     Проверяет JWT-токен и возвращает его payload, если токен валиден.
     Также проверяет, не отозван ли токен.
@@ -289,10 +287,9 @@ async def cleanup_expired_tokens(session: SessionDep):
     """
     Удаляет истёкшие токены из таблицы active_tokens.
     """
-    await session.execute(delete(ActiveTokenModel).where(ActiveTokenModel.expires_at < datetime.utcnow()))
-    await session.execute(delete(RevokedTokenModel).where(RevokedTokenModel.expires_at < datetime.utcnow()))
-    await session.execute(delete(RefreshTokenModel).where(RefreshTokenModel.expires_at < datetime.utcnow()))
-    models = {}
+    models = [ActiveTokenModel, RevokedTokenModel, RefreshTokenModel]
+    for model in models:
+        await session.execute(delete(model).where(model.expires_at < datetime.utcnow()))
     await session.commit()
 
 
@@ -314,51 +311,60 @@ async def get_active_tokens(session: SessionDep, token: str = Depends(oauth2_sch
     )
     active_tokens = active_tokens.scalars().all()
 
-    return [{
-        'token': t.token,
-        'created_at': t.created_at,
-        'expires_at': t.expires_at,
-    } for t in active_tokens]
+    # собираем токены заново на основе данных из базы
+    token_list = []
+    for t in active_tokens:
+        # формируем payload для токена
+        token_payload = {
+            'sub': user.username,
+            'exp': t.expires_at,
+            'jti': t.jti
+        }
+        # кодируем токен
+        reconstructed_token = jwt.encode(token_payload, SECRET_KEY, algorithm=ALGORITHM)
+        token_list.append({
+            'token': reconstructed_token,
+            'created_at': t.created_at,
+            'expires_at': t.expires_at,
+        })
+
+    return token_list
 
 
 @router.post('/out')
-async def logout(
-    token: str = Depends(oauth2_scheme),  # Текущий токен пользователя
-    session: AsyncSession = Depends(get_session),     # Сессия базы данных
-):
+async def logout(session: SessionDep, token: str = Depends(oauth2_scheme)):
     """
     Маршрут для разлогирования пользователя.
     Отзывает текущий токен доступа.
     """
     # проверяем валидность токена
-    await verify_token(token, session)
+    payload = await verify_token(token, session)
+
+    jti = payload['jti']
 
     # проверяем, не отозван ли токен уже
     existing_token = await session.execute(
-        select(RevokedTokenModel).where(RevokedTokenModel.token == token)
+        select(RevokedTokenModel).where(RevokedTokenModel.jti == jti)
     )
     if existing_token.scalar():
         raise HTTPException(status_code=400, detail='Токен уже отозван')
 
     # добавляем токен в список отозванных
     revoked_token = RevokedTokenModel(
-        token=token,
+        jti=jti,
         expires_at=datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
     )
     session.add(revoked_token)
 
     # удаляем из активных токенов
-    await session.execute(delete(ActiveTokenModel).where(ActiveTokenModel.token == token))
+    await session.execute(delete(ActiveTokenModel).where(ActiveTokenModel.jti == jti))
     await session.commit()
 
     return {'message': 'Вы успешно разлогинились'}
 
 
 @router.post('/out_all')
-async def revoke_all_tokens(
-    token: str = Depends(oauth2_scheme),
-    session: AsyncSession = Depends(get_session),
-):
+async def revoke_all_tokens(session: SessionDep, token: str = Depends(oauth2_scheme)):
     """
     Маршрут для отзыва всех активных токенов пользователя.
     """
@@ -369,28 +375,19 @@ async def revoke_all_tokens(
     if not user:
         raise HTTPException(status_code=404, detail='Пользователь не найден')
 
-        # отзываем все access-токены
+    # отзываем все access-токены
     active_tokens = await session.execute(
         select(ActiveTokenModel).where(ActiveTokenModel.user_id == user.id)
     )
     active_tokens = active_tokens.scalars().all()
     for t in active_tokens:
         session.add(RevokedTokenModel(
-               token=t.token,
+               jti=t.jti,
                expires_at=t.expires_at
         ))
     await session.execute(delete(ActiveTokenModel).where(ActiveTokenModel.user_id == user.id))
 
     # отзываем все refresh-токены
-    refresh_tokens = await session.execute(
-         select(RefreshTokenModel).where(RefreshTokenModel.user_id == user.id)
-    )
-    refresh_tokens = refresh_tokens.scalars().all()
-    for t in refresh_tokens:
-        session.add(RevokedTokenModel(
-            token=t.token,
-            expires_at=t.expires_at
-        ))
     await session.execute(delete(RefreshTokenModel).where(RefreshTokenModel.user_id == user.id))
 
     await session.commit()
@@ -398,10 +395,7 @@ async def revoke_all_tokens(
 
 
 @router.post('/refresh', response_model=AuthResponseSchema)
-async def refresh_token(
-    refresh_token: str = Body(..., embed=True),  # принимаем токен обновления в запросе
-    session: AsyncSession = Depends(get_session),
-):
+async def refresh_token(session: SessionDep, refresh_token: str = Body(..., embed=True)):
     """
     Маршрут для обновления access-токена с помощью refresh-токена
     """
@@ -412,9 +406,11 @@ async def refresh_token(
     except jwt.InvalidTokenError:
         raise HTTPException(status_code=401, detail='Неверный refresh-токен')
 
+    token_hash = hashlib.sha256(refresh_token.encode()).hexdigest()
+
     # проверяем, существует ли refresh-токен в базе
     token_in_db = await session.execute(
-        select(RefreshTokenModel).where(RefreshTokenModel.token == refresh_token)
+        select(RefreshTokenModel).where(RefreshTokenModel.token_hash == token_hash)
     )
     token_in_db = token_in_db.scalar()
     if not token_in_db or token_in_db.expires_at < datetime.utcnow():
@@ -429,8 +425,8 @@ async def refresh_token(
         raise HTTPException(status_code=404, detail='Пользователь не найден')
 
     # генерируем новый access-токен
-    new_access_token = create_access_token(data={'sub': user.username})
-    await add_active_token(user_id=user.id, token=new_access_token, session=session)
+    new_access_token, new_jti = create_access_token(data={'sub': user.username})
+    await add_active_token(user_id=user.id, jti=new_jti, session=session)
 
     # возвращаем оба токена (refresh_token остаётся тем же)
     return AuthResponseSchema(
@@ -441,10 +437,7 @@ async def refresh_token(
 
 
 @router.get('/me', response_model=UserResponseSchema)
-async def get_my_info(
-        token: str = Depends(oauth2_scheme),
-        session: AsyncSession = Depends(get_session),
-):
+async def get_my_info(session: SessionDep, token: str = Depends(oauth2_scheme)):
     """
     Маршрут для получения информации о пользователе
     """
@@ -465,10 +458,10 @@ async def get_my_info(
 
 @router.post('/change_password')
 async def change_password(
+    session: SessionDep,
     old_password: str,
     new_password: str,
-    token: str = Depends(oauth2_scheme),  # передаём `verify_token` без вызова
-    session: AsyncSession = Depends(get_session),  # используем AsyncSession напрямую
+    token: str = Depends(oauth2_scheme),
 ):
     """
     Маршрут для смены пароля
