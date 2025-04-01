@@ -1,4 +1,6 @@
 # auth_controller.py:
+import hashlib
+import uuid
 from datetime import datetime, timedelta
 import re
 
@@ -137,8 +139,8 @@ async def register(user_data: RegisterRequestSchema, session: SessionDep):
 
 @router.post('/login', response_model=AuthResponseSchema)
 async def login(
-    form_data: OAuth2PasswordRequestForm = Depends(),
-    session: AsyncSession = Depends(get_session),
+        session: SessionDep,
+        form_data: OAuth2PasswordRequestForm = Depends(),
 ):
     """
     Маршрут для авторизации пользователя
@@ -151,19 +153,18 @@ async def login(
     if not user or not verify_password(form_data.password, user.hashed_password):
         raise HTTPException(status_code=400, detail='Неверное имя пользователя или пароль')
 
-    access_token = create_access_token(data={'sub': user.username})
+    access_token, access_jti = create_access_token(data={'sub': user.username})
     refresh_token = create_refresh_token(data={'sub': user.username})
-    await add_active_token(user_id=user.id, token=access_token, session=session)
+    await add_active_token(user_id=user.id, jti=access_jti, session=session)
     await add_refresh_token(user_id=user.id, token=refresh_token, session=session)
 
     return AuthResponseSchema(
         access_token=access_token,
         refresh_token=refresh_token,
-        token_type='bearer'
-    )
+        token_type='bearer')
 
 
-def create_refresh_token(data: dict):
+def create_refresh_token(data: dict) -> str:
     """
     Создает refresh-токен на основе переданных данных
     """
@@ -174,15 +175,16 @@ def create_refresh_token(data: dict):
     return encoded_jwt
 
 
-def create_access_token(data: dict):
+def create_access_token(data: dict) -> tuple[str, str]:
     """
     Создает JWT-токен на основе переданных данных.
     """
     to_encode = data.copy()
     expire = datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
-    to_encode.update({'exp': expire})
+    jti = str(uuid.uuid4())
+    to_encode.update({'exp': expire, 'jti': jti})
     encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
-    return encoded_jwt
+    return encoded_jwt, jti
 
 
 async def verify_token(token: str, session: AsyncSession = Depends(get_session)):
@@ -205,9 +207,17 @@ async def verify_token(token: str, session: AsyncSession = Depends(get_session))
             headers={'WWW-Authenticate': 'Bearer'},
         )
 
+    jti = payload.get('jti')
+    if not jti:
+        raise HTTPException(
+            status_code=401,
+            detail='Токен не содержит jti',
+            headers={'WWW-Authenticate': 'Bearer'}
+        )
+
     # чек, не отозван ли токен
     revoked_token = await session.execute(
-        select(RevokedTokenModel).where(RevokedTokenModel.token == token)
+        select(RevokedTokenModel).where(RevokedTokenModel.jti == jti)
     )
     if revoked_token.scalar():
         raise HTTPException(
@@ -228,7 +238,7 @@ async def verify_token(token: str, session: AsyncSession = Depends(get_session))
     return payload
 
 
-async def add_active_token(user_id: int, token: str, session: SessionDep):
+async def add_active_token(user_id: int, jti: str, session: SessionDep):
     """
     Добавляет новый активный токен для пользователя.
     Если количество токенов превышает лимит, удаляет самый старый токен.
@@ -251,7 +261,7 @@ async def add_active_token(user_id: int, token: str, session: SessionDep):
     # Добавляем новый токен
     new_token = ActiveTokenModel(
         user_id=user_id,
-        token=token,
+        jti=jti,
         created_at=datetime.utcnow(),
         expires_at=datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
     )
@@ -263,9 +273,11 @@ async def add_refresh_token(user_id: int, token: str, session: SessionDep):
     """
     Добавляет новый токен обновления в БД
     """
+    token_hash = hashlib.sha256(token.encode()).hexdigest()
+
     new_token = RefreshTokenModel(
         user_id=user_id,
-        token=token,
+        token_hash=token_hash,
         created_at=datetime.utcnow(),
         expires_at=datetime.utcnow() + timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS)
     )
@@ -277,16 +289,15 @@ async def cleanup_expired_tokens(session: SessionDep):
     """
     Удаляет истёкшие токены из таблицы active_tokens.
     """
-    await session.execute(
-        delete(ActiveTokenModel).where(ActiveTokenModel.expires_at < datetime.utcnow())
-    )
+    await session.execute(delete(ActiveTokenModel).where(ActiveTokenModel.expires_at < datetime.utcnow()))
+    await session.execute(delete(RevokedTokenModel).where(RevokedTokenModel.expires_at < datetime.utcnow()))
+    await session.execute(delete(RefreshTokenModel).where(RefreshTokenModel.expires_at < datetime.utcnow()))
+    models = {}
     await session.commit()
 
 
 @router.get('/tokens')
-async def get_active_tokens(
-    token: str = Depends(oauth2_scheme),
-    session: AsyncSession = Depends(get_session),
+async def get_active_tokens(session: SessionDep, token: str = Depends(oauth2_scheme),
 ):
     """
     Маршрут для получения списка активных токенов пользователя.

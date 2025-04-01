@@ -77,7 +77,7 @@ class ActiveTokenModel(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     user_id: Mapped[int] = mapped_column(ForeignKey('users.id'), nullable=False)
-    token: Mapped[str] = mapped_column(String, unique=True, nullable=False)
+    jti: Mapped[str] = mapped_column(String, unique=True, nullable=False)
     created_at: Mapped[datetime] = mapped_column(default=datetime.utcnow)
     expires_at: Mapped[datetime] = mapped_column(nullable=False)
 
@@ -86,7 +86,7 @@ class RevokedTokenModel(Base):
     __tablename__ = 'revoked_tokens'
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    token: Mapped[str] = mapped_column(String, unique=True, nullable=False)
+    jti: Mapped[str] = mapped_column(String, unique=True, nullable=False)
     expires_at: Mapped[datetime] = mapped_column(nullable=False)
 
 
