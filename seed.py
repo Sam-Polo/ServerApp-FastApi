@@ -100,11 +100,19 @@ async def run_seed(session: SessionDep):
     entities = ['user', 'role', 'permission']
     permissions = [
         {'name': 'Просмотр роли пользователя', 'code': 'view-user-role',
-         'description': 'Разрешение на просмотр роли пользователя'},
+         'description': 'Разрешение на просмотр текущих ролей пользователя'},
+        {'name': 'Получение истории изменений пользователя', 'code': 'get-story-user',
+         'description': 'Разрешение на просмотр истории изменений пользователя'},
+        {'name': 'Получение истории изменений роли', 'code': 'get-story-role',
+         'description': 'Разрешение на просмотр истории изменений роли'},
+        {'name': 'Получение истории изменений разрешения', 'code': 'get-story-permission',
+         'description': 'Разрешение на просмотр истории изменений разрешения'},
         {'name': 'Назначение роли пользователю', 'code': 'assign-role',
          'description': 'Разрешение на назначение роли пользователю'},
         {'name': 'Назначение разрешения пользователю', 'code': 'assign-permission',
          'description': 'Добавление разрешения к роли'},
+        {'name': 'Восстановление из лога', 'code': 'restore-from-log',
+         'description': 'Разрешение на восстановление old_value из логирования'},
     ]
     for entity in entities:
         permissions.extend([

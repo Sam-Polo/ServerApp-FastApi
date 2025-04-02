@@ -45,6 +45,8 @@ async def create_role(request: CreateRoleRequestSchema,
     Создание новой роли
     """
     async with session.begin_nested():
+        request.name = request.name.lower()
+        request.code = request.code.lower()
 
         # проверяем, существует ли роль с таким кодом или именем
         stmt_code = select(RoleModel).where(RoleModel.code == request.code)
@@ -98,10 +100,7 @@ async def create_role(request: CreateRoleRequestSchema,
             user_id=current_user.id,
         )
 
-    await session.refresh(role)
-    stmt = select(RoleModel).where(RoleModel.id == role.id).options(selectinload(RoleModel.permissions))
-    result = await session.execute(stmt)
-    role = result.scalar_one()
+    await session.refresh(role, attribute_names=['permissions'])
     return request.to_response(role)
 
 
@@ -148,8 +147,12 @@ async def update_role(
     Обновление роли
     """
     async with session.begin_nested():
+        request.name = request.name.lower()
+        request.code = request.code.lower()
+
         # находим роль по id
-        stmt = select(RoleModel).where(RoleModel.id == id, RoleModel.deleted_at.is_(None))
+        stmt = select(RoleModel).where(RoleModel.id == id, RoleModel.deleted_at.is_(None)).options(
+            selectinload(RoleModel.permissions))
         result = await session.execute(stmt)
         role = result.scalar_one_or_none()
 
@@ -161,14 +164,36 @@ async def update_role(
             'name': role.name,
             'description': role.description,
             'code': role.code,
+            'created_by': role.created_by,
         }
 
+        # проверяем уникальность
+        if request.name and request.name != role.name:
+            stmt_name = select(RoleModel).where(
+                RoleModel.name == request.name,
+                RoleModel.id != role.id,
+                RoleModel.deleted_at.is_(None)
+            )
+            result_name = await session.execute(stmt_name)
+            if result_name.scalar_one_or_none():
+                raise HTTPException(status_code=400, detail=f'Роль с именем "{request.name}" уже существует')
+
+        if request.code and request.code != role.code:
+            stmt_code = select(RoleModel).where(
+                RoleModel.code == request.code,
+                RoleModel.id != role.id,
+                RoleModel.deleted_at.is_(None)
+            )
+            result_code = await session.execute(stmt_code)
+            if result_code.scalar_one_or_none():
+                raise HTTPException(status_code=400, detail=f'Роль с кодом "{request.code}" уже существует')
+
         # обновляем только переданные поля
-        if request.name is not None and request.name != 'string':
+        if request.name and request.name != 'string':
             role.name = request.name
-        if request.description is not None and request.description != 'string':
+        if request.description and request.description != 'string':
             role.description = request.description
-        if request.code is not None and request.code != 'string':
+        if request.code and request.code != 'string':
             role.code = request.code
 
         # новое состояние
@@ -176,6 +201,7 @@ async def update_role(
             'name': role.name,
             'description': role.description,
             'code': role.code,
+            'created_by': role.created_by,
         }
 
         # логирование
@@ -189,7 +215,7 @@ async def update_role(
             user_id=current_user.id,
         )
 
-    await session.refresh(role)
+    await session.refresh(role, attribute_names=['permissions'])
     return request.to_response(role=role)
 
 
@@ -215,6 +241,7 @@ async def delete_role_hard(
             'name': role.name,
             'description': role.description,
             'code': role.code,
+            'created_by': role.created_by,
             'deleted_at': role.deleted_at.isoformat() if role.deleted_at else None,
         }
 
@@ -249,13 +276,14 @@ async def delete_role_soft(
         result = await session.execute(stmt)
         role = result.scalar_one_or_none()
         if not role:
-            raise HTTPException(status_code=404, detail=f'Роль с ID {id} не найдена')
+            raise HTTPException(status_code=404, detail=f'Роль с ID {id} не найдена или уже удалена')
 
         # старое состояние
         old_value = {
             'name': role.name,
             'description': role.description,
             'code': role.code,
+            'created_by': role.created_by,
             'deleted_at': None,
         }
 
@@ -267,6 +295,7 @@ async def delete_role_soft(
             'name': role.name,
             'description': role.description,
             'code': role.code,
+            'created_by': role.created_by,
             'deleted_at': role.deleted_at.isoformat(),
         }
 
@@ -315,6 +344,7 @@ async def restore_role(
             'name': role.name,
             'description': role.description,
             'code': role.code,
+            'created_by': role.created_by,
             'deleted_at': role.deleted_at.isoformat(),
         }
 
@@ -327,6 +357,7 @@ async def restore_role(
             'name': role.name,
             'description': role.description,
             'code': role.code,
+            'created_by': role.created_by,
             'deleted_at': None,
         }
 
@@ -443,6 +474,9 @@ async def update_permission(
     Обновление разрешения
     """
     async with session.begin_nested():
+        request.code = request.code.lower()
+
+        # находим разрешение по id
         stmt = select(PermissionModel).where(PermissionModel.id == permission_id)
         result = await session.execute(stmt)
         permission = result.scalar_one_or_none()
@@ -450,38 +484,50 @@ async def update_permission(
         if not permission:
             raise HTTPException(status_code=404, detail=f'Разрешение с ID {permission_id} не найдено')
 
-        if request.code != permission.code:  # Проверяем только если code изменился
-            stmt_check = select(PermissionModel).where(
-                PermissionModel.code == request.code,
-                PermissionModel.id != permission_id,   # Исключаем текущую запись
-            )
-            result_check = await session.execute(stmt_check)
-
-            if result_check.scalar_one_or_none():
-                raise HTTPException(
-                    status_code=400,
-                    detail=f'Разрешение с code="{request.code}" уже существует'
-                )
-
         # старое состояние
         old_value = {
             'name': permission.name,
             'code': permission.code,
             'description': permission.description,
+            'created_by': permission.created_by,
         }
 
-        permission.name = request.name
-        permission.code = request.code
-        permission.description = request.description
+        # проверяем уникальность
+        if request.name and request.name != permission.name:
+            stmt_name = select(PermissionModel).where(
+                PermissionModel.name == request.name,
+                PermissionModel.id != permission_id,
+            )
+            result_name = await session.execute(stmt_name)
+            if result_name.scalar_one_or_none():
+                raise HTTPException(status_code=400, detail=f'Разрешение с именем "{request.name}" уже существует')
+
+        if request.code and request.code != permission.code:
+            stmt_code = select(PermissionModel).where(
+                PermissionModel.code == request.code,
+                PermissionModel.id != permission_id,
+            )
+            result_code = await session.execute(stmt_code)
+            if result_code.scalar_one_or_none():
+                raise HTTPException(status_code=400, detail=f'Разрешение с кодом "{request.code}" уже существует')
+
+        # обновляем только переданные поля, игнорируя "string"
+        if request.name and request.name != 'string':
+            permission.name = request.name
+        if request.code and request.code != 'string':
+            permission.code = request.code
+        if request.description and request.description != 'string':
+            permission.description = request.description
 
         # новое состояние
         new_value = {
             'name': permission.name,
             'code': permission.code,
             'description': permission.description,
+            'created_by': permission.created_by,
         }
 
-        # логирование
+        # Логирование
         await log_mutation(
             session=session,
             entity_type='permission',
@@ -515,6 +561,7 @@ async def delete_permission_hard(
             'name': permission.name,
             'code': permission.code,
             'description': permission.description,
+            'created_by': permission.created_by,
             'deleted_at': permission.deleted_at.isoformat() if permission.deleted_at else None,
         }
 
@@ -553,6 +600,7 @@ async def delete_permission_soft(
             'name': permission.name,
             'code': permission.code,
             'description': permission.description,
+            'created_by': permission.created_by,
             'deleted_at': None,
         }
 
@@ -565,6 +613,7 @@ async def delete_permission_soft(
             'name': permission.name,
             'code': permission.code,
             'description': permission.description,
+            'created_by': permission.created_by,
             'deleted_at': permission.deleted_at.isoformat(),
         }
 
@@ -605,6 +654,7 @@ async def restore_permission(
             'name': permission.name,
             'description': permission.description,
             'code': permission.code,
+            'created_by': permission.created_by,
             'deleted_at': permission.deleted_at.isoformat(),
         }
 
@@ -617,6 +667,7 @@ async def restore_permission(
             'name': permission.name,
             'description': permission.description,
             'code': permission.code,
+            'created_by': permission.created_by,
             'deleted_at': None,
         }
 
@@ -718,8 +769,8 @@ async def remove_role_from_user(
 
         # старое состояние
         old_value = {
-            'id': user.id,
-            'roles': [r.id for r in user.roles],
+            'id': user_obj.id,
+            'roles': [r.id for r in user_obj.roles],
         }
 
         # удаляем роль
@@ -727,22 +778,22 @@ async def remove_role_from_user(
 
         # новое состояние
         new_value = {
-            'id': user.id,
-            'roles': [r.id for r in user.roles],
+            'id': user_obj.id,
+            'roles': [r.id for r in user_obj.roles],
         }
 
         # логирование
         await log_mutation(
             session=session,
             entity_type='user',
-            entity_id=user.id,
+            entity_id=user_obj.id,
             operation='update',  # это обновление записи пользователя
             old_value=old_value,
             new_value=new_value,
             user_id=current_user.id,  # кто выполнил действие
         )
 
-    await session.refresh(user)
+    await session.refresh(user_obj)
     return {'message': f'Роль с ID {role} удалена у пользователя с ID {user}'}
 
 
@@ -966,20 +1017,7 @@ async def restore_from_log(
         if hasattr(entity, 'deleted_by'):
             entity.deleted_by = None
 
-        # логируем восстановление
-        old_state = {key: getattr(entity, key) for key in restore_value.keys() if hasattr(entity, key)}
         await session.flush()
-        new_state = {key: getattr(entity, key) for key in restore_value.keys() if hasattr(entity, key)}
-
-        await log_mutation(
-            session=session,
-            entity_type=entity_type,
-            entity_id=entity_id,
-            operation='restore',
-            old_value=old_state,
-            new_value=new_state,
-            user_id=current_user.id,
-        )
 
     await session.refresh(entity)
     return {'message': f'Сущность {entity_type} с ID {entity_id} восстановлена из лога {log_id}'}
