@@ -140,7 +140,7 @@ async def register(user_data: RegisterRequestSchema, session: SessionDep):
             'username': new_user.username,
             'email': new_user.email,
             'birthday': new_user.birthday.isoformat(),
-            'role_ids': [role.id for role in new_user.roles]
+            'role_ids': []
         }
         await log_mutation(
             session=session,
