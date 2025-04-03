@@ -3,6 +3,7 @@ from datetime import datetime, date
 from typing import Optional, Any
 
 import json
+
 from pydantic import BaseModel, ConfigDict
 import sqlalchemy
 from sqlalchemy import String, Integer, Date, ForeignKey, DateTime, Table, Column
@@ -49,6 +50,11 @@ class AuthResponseSchema(BaseModel):
     access_token: str  # токен доступа
     refresh_token: str  # токен обновления
     token_type: str  # тип токена (по умолчанию bearer)
+
+
+class TemporaryTokenResponse(BaseModel):
+    temporary_token: str
+    message: str
 
 
 class RegisterResponseSchema(BaseModel):
@@ -205,6 +211,7 @@ class UserModel(Base):
     email: Mapped[str] = mapped_column(String(64), unique=True)
     hashed_password: Mapped[str] = mapped_column(String(256), nullable=False)
     birthday: Mapped[date] = mapped_column(Date)
+    is_2fa_enabled: Mapped[bool] = mapped_column(default=False)
 
     # отношение к роли
     roles = relationship('RoleModel', secondary=user_roles, back_populates='users')
@@ -248,9 +255,9 @@ class RoleModel(Base):
     name: Mapped[str] = mapped_column(String, nullable=False, unique=True)
     description: Mapped[str | None] = mapped_column(String, nullable=True)
     code: Mapped[str] = mapped_column(String, nullable=False, unique=True)
-    created_at: Mapped[DateTime] = mapped_column(DateTime, nullable=False, server_default=sqlalchemy.func.now())
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, server_default=sqlalchemy.func.now())
     created_by: Mapped[int] = mapped_column(Integer, ForeignKey('users.id', use_alter=True), nullable=True)
-    deleted_at: Mapped[DateTime | None] = mapped_column(DateTime, nullable=True)
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     deleted_by: Mapped[int | None] = mapped_column(Integer, ForeignKey('users.id', use_alter=True), nullable=True)
 
     users = relationship('UserModel', secondary=user_roles, back_populates='roles')
@@ -304,3 +311,26 @@ class ChangeLogModel(Base):
 
     def __repr__(self) -> str:
         return f'<ChangeLogModel(id={self.id}, entity_type={self.entity_type!r}, operation={self.operation!r})>'
+
+
+class TemporaryTokenModel(Base):
+    __tablename__ = 'temporary_tokens'
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey('users.id'), nullable=False)
+    token: Mapped[str] = mapped_column(String(256), unique=True, nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(nullable=False)
+    is_used: Mapped[bool] = mapped_column(default=False)
+
+
+class TwoFactorCodeModel(Base):
+    __tablename__ = 'two_factor_codes'
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey('users.id'), nullable=False)
+    code: Mapped[str] = mapped_column(String(6), nullable=False)
+    user_agent_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(default=datetime.utcnow)
+    expires_at: Mapped[datetime] = mapped_column(nullable=False)
+    is_used: Mapped[bool] = mapped_column(default=False)
+    request_count: Mapped[int] = mapped_column(default=0)

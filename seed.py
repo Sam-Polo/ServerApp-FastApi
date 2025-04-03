@@ -54,6 +54,7 @@ async def run_seed(session: SessionDep):
             email='alex@mail.ru',
             hashed_password=hash_password('String1234!'),
             birthday=datetime.utcnow(),
+            is_2fa_enabled=False,
         )
         user.roles.extend([admin_role, user_role])  # назначаем Admin и User
         session.add(user)
@@ -66,6 +67,8 @@ async def run_seed(session: SessionDep):
             user.roles.append(admin_role)
         if user_role not in user.roles:
             user.roles.append(user_role)
+        if user.is_2fa_enabled is None:
+            user.is_2fa_enabled = False
         await session.commit()
 
     # обновляем created_by для ролей, теперь когда есть admin_id
@@ -85,6 +88,7 @@ async def run_seed(session: SessionDep):
             email='user_user@mail.ru',
             hashed_password=hash_password('String1234!'),
             birthday=datetime.utcnow(),
+            is_2fa_enabled=False,
         )
         user_user.roles.extend([user_role])  # назначаем User
         session.add(user_user)
@@ -93,6 +97,8 @@ async def run_seed(session: SessionDep):
             user_user.roles.append(user_role)
         if guest_role not in user_user.roles:
             user_user.roles.append(guest_role)
+        if user_user.is_2fa_enabled is None:
+            user_user.is_2fa_enabled = False
 
     await session.commit()
 

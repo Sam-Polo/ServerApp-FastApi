@@ -1,10 +1,14 @@
 # auth_controller.py:
+import asyncio
 import hashlib
+import os
+import random
 import uuid
 from datetime import datetime, timedelta
 import re
+from typing import Union
 
-from fastapi import APIRouter, HTTPException, Depends, Body
+from fastapi import APIRouter, HTTPException, Depends, Body, Request, Path
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from sqlalchemy import select, delete
 import jwt
@@ -14,7 +18,8 @@ from sqlalchemy.orm import selectinload
 from models import (RegisterRequestSchema, AuthRequestSchema,
                     RegisterResponseSchema, AuthResponseSchema,
                     UserModel, ActiveTokenModel, RevokedTokenModel,
-                    UserResponseSchema, RefreshTokenModel, RoleModel)
+                    UserResponseSchema, RefreshTokenModel, RoleModel, TemporaryTokenModel, TwoFactorCodeModel,
+                    TemporaryTokenResponse)
 from db import SessionDep
 from utils import log_mutation
 
@@ -82,7 +87,7 @@ async def register(user_data: RegisterRequestSchema, session: SessionDep):
     Маршрут для регистрации пользователя.
     Принимает данные о пользователе и возвращает сообщение об успешной регистрации.
     """
-    async with session.begin():  # одна транзакция (автоматически коммитится при успешном выходе из блока)
+    async with session.begin_nested():  # одна транзакция (автоматически коммитится при успешном выходе из блока)
         user_data.email = user_data.email.lower()
 
         # проверка username
@@ -131,6 +136,7 @@ async def register(user_data: RegisterRequestSchema, session: SessionDep):
             email=user_data.email,
             hashed_password=hashed_password,
             birthday=user_data.birthday,
+            is_2fa_enabled=False,
         )
         session.add(new_user)
         await session.flush()
@@ -140,7 +146,7 @@ async def register(user_data: RegisterRequestSchema, session: SessionDep):
             'username': new_user.username,
             'email': new_user.email,
             'birthday': new_user.birthday.isoformat(),
-            'role_ids': [role.id for role in new_user.roles]
+            'role_ids': []
         }
         await log_mutation(
             session=session,
@@ -155,29 +161,174 @@ async def register(user_data: RegisterRequestSchema, session: SessionDep):
     return user_data.to_response()
 
 
-@router.post('/login', response_model=AuthResponseSchema)
-async def login(session: SessionDep, form_data: OAuth2PasswordRequestForm = Depends()):
+@router.post('/login', response_model=Union[AuthResponseSchema, TemporaryTokenResponse])
+async def login(session: SessionDep, request: Request, form_data: OAuth2PasswordRequestForm = Depends()):
     """
     Маршрут для авторизации пользователя
     принимает логин и пароль, возвращает jwt-токен
     """
-    # поиск пользователя в бд
-    async with session.begin():
+    async with session.begin_nested():
+        # поиск пользователя в бд
         user = await session.execute(select(UserModel).where(UserModel.username == form_data.username))
         user = user.scalar()
 
         if not user or not verify_password(form_data.password, user.hashed_password):
             raise HTTPException(status_code=400, detail='Неверное имя пользователя или пароль')
 
+        if not user.is_2fa_enabled:
+            # Если 2FA выключена, выдаём полноценные токены
+            access_token, access_jti = create_access_token(data={'sub': user.username})
+            refresh_token = create_refresh_token(data={'sub': user.username})
+            await add_active_token(user.id, access_jti, session)
+            await add_refresh_token(user.id, refresh_token, session)
+
+            await session.flush()
+
+            return AuthResponseSchema(
+                access_token=access_token,
+                refresh_token=refresh_token,
+                token_type='bearer'
+            )
+        else:
+            # Если 2FA включена, выдаём временный токен
+            temp_token = create_temporary_token(user.id)
+            payload = jwt.decode(temp_token, SECRET_KEY, algorithms=[ALGORITHM])  # Декодируем для получения exp
+            expire = datetime.fromtimestamp(payload['exp'])  # Преобразуем exp в datetime
+            temp_token_model = TemporaryTokenModel(
+                user_id=user.id,
+                token=temp_token,
+                expires_at=expire
+            )
+
+            session.add(temp_token_model)
+            await session.flush()
+            await session.refresh(temp_token_model)
+            return {"temporary_token": temp_token, "message": "Требуется код 2FA. Запросите его через /auth/2fa/request"}
+
+
+@router.post('/2fa/generate', response_model=dict)
+async def generate_2fa_code(
+    session: SessionDep,
+    request: Request,
+    temp_token: str = Body(...),
+):
+    """
+    Запрос нового кода 2FA
+    """
+    async with session.begin():
+        # Проверяем временный токен
+        try:
+            payload = jwt.decode(temp_token, SECRET_KEY, algorithms=[ALGORITHM])
+            if payload.get('type') != 'temporary':
+                raise HTTPException(status_code=400, detail="Неверный тип токена")
+            user_id = int(payload['sub'])
+        except (jwt.ExpiredSignatureError, jwt.InvalidTokenError):
+            raise HTTPException(status_code=401, detail="Временный токен истёк или недействителен")
+
+        stmt = select(TemporaryTokenModel).where(
+            TemporaryTokenModel.token == temp_token,
+            TemporaryTokenModel.user_id == user_id,
+            TemporaryTokenModel.is_used == False,
+            TemporaryTokenModel.expires_at > datetime.utcnow()
+        )
+        temp_token_record = (await session.execute(stmt)).scalar_one_or_none()
+        if not temp_token_record:
+            raise HTTPException(status_code=400, detail="Временный токен недействителен")
+
+        # Проверяем существующий код
+        user_agent_hash = hashlib.sha256(request.headers.get('User-Agent', '').encode()).hexdigest()
+        stmt = select(TwoFactorCodeModel).where(
+            TwoFactorCodeModel.user_id == user_id,
+            TwoFactorCodeModel.user_agent_hash == user_agent_hash
+        )
+        existing_code = (await session.execute(stmt)).scalar_one_or_none()
+
+        if existing_code and existing_code.request_count >= 3:
+            await asyncio.sleep(30)  # Задержка 30 секунд при >3 запросах
+
+        # Генерируем новый код
+        new_code = str(random.randint(100000, 999999))
+        expiry_minutes = int(os.getenv('TWO_FACTOR_CODE_EXPIRY_MINUTES', 5))
+        expires_at = datetime.utcnow() + timedelta(minutes=expiry_minutes)
+
+        if existing_code:
+            existing_code.code = new_code
+            existing_code.expires_at = expires_at
+            existing_code.is_used = False
+            existing_code.request_count += 1
+        else:
+            new_2fa = TwoFactorCodeModel(
+                user_id=user_id,
+                code=new_code,
+                user_agent_hash=user_agent_hash,
+                expires_at=expires_at,
+                request_count=1
+            )
+            session.add(new_2fa)
+
+        await session.flush()
+        return {"code": new_code}
+
+
+@router.post('/2fa/verify', response_model=AuthResponseSchema)
+async def verify_2fa_code(
+    session: SessionDep,
+    request: Request,
+    temp_token: str = Body(...),
+    two_factor_code: str = Body(...),
+):
+    """Подтверждение кода 2FA и выдача полноценных токенов"""
+    async with session.begin():
+        # Проверяем временный токен
+        try:
+            payload = jwt.decode(temp_token, SECRET_KEY, algorithms=[ALGORITHM])
+            if payload.get('type') != 'temporary':
+                raise HTTPException(status_code=400, detail="Неверный тип токена")
+            user_id = int(payload['sub'])
+        except (jwt.ExpiredSignatureError, jwt.InvalidTokenError):
+            raise HTTPException(status_code=401, detail="Временный токен истёк или недействителен")
+
+        stmt = select(TemporaryTokenModel).where(
+            TemporaryTokenModel.token == temp_token,
+            TemporaryTokenModel.user_id == user_id,
+            TemporaryTokenModel.is_used == False,
+            TemporaryTokenModel.expires_at > datetime.utcnow()
+        )
+        temp_token_record = (await session.execute(stmt)).scalar_one_or_none()
+        if not temp_token_record:
+            raise HTTPException(status_code=400, detail="Временный токен недействителен")
+
+        # Проверяем 2FA-код
+        user_agent_hash = hashlib.sha256(request.headers.get('User-Agent', '').encode()).hexdigest()
+        stmt = select(TwoFactorCodeModel).where(
+            TwoFactorCodeModel.user_id == user_id,
+            TwoFactorCodeModel.user_agent_hash == user_agent_hash,
+            TwoFactorCodeModel.code == two_factor_code,
+            TwoFactorCodeModel.is_used == False,
+            TwoFactorCodeModel.expires_at > datetime.utcnow()
+        )
+        code_record = (await session.execute(stmt)).scalar_one_or_none()
+
+        if not code_record:
+            raise HTTPException(status_code=400, detail="Неверный или истёкший код 2FA")
+
+        # Помечаем временный токен и код как использованные
+        temp_token_record.is_used = True
+        code_record.is_used = True
+
+        # Выдаём полноценные токены
+        user = await session.get(UserModel, user_id)
         access_token, access_jti = create_access_token(data={'sub': user.username})
         refresh_token = create_refresh_token(data={'sub': user.username})
-        await add_active_token(user_id=user.id, jti=access_jti, session=session)
-        await add_refresh_token(user_id=user.id, token=refresh_token, session=session)
+        await add_active_token(user.id, access_jti, session)
+        await add_refresh_token(user.id, refresh_token, session)
+        await session.commit()
 
-    return AuthResponseSchema(
-        access_token=access_token,
-        refresh_token=refresh_token,
-        token_type='bearer')
+        return AuthResponseSchema(
+            access_token=access_token,
+            refresh_token=refresh_token,
+            token_type='bearer'
+        )
 
 
 def create_refresh_token(data: dict) -> str:
@@ -201,6 +352,17 @@ def create_access_token(data: dict) -> tuple[str, str]:
     to_encode.update({'exp': expire, 'jti': jti})
     encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
     return encoded_jwt, jti
+
+
+def create_temporary_token(user_id: int) -> str:
+    """
+    Создаёт временный токен для 2FA
+    """
+    expire = datetime.utcnow() + timedelta(minutes=5)  # временный токен живёт 5 минут
+    jti = str(uuid.uuid4())
+    payload = {'sub': str(user_id), 'exp': expire, 'jti': jti, 'type': 'temporary'}
+
+    return jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
 
 
 async def verify_token(token: str, session: SessionDep):
@@ -247,9 +409,12 @@ async def verify_token(token: str, session: SessionDep):
         select(UserModel).where(UserModel.username == payload['sub'])
     )
     user = user.scalar()
-
     if not user:
         raise HTTPException(status_code=404, detail='Пользователь не найден')
+
+    # если 2FA включена, проверяем, что это не временный токен
+    if user.is_2fa_enabled and payload.get('type') == 'temporary':
+        raise HTTPException(status_code=403, detail='Требуется подтверждение 2FA')
 
     return payload
 
@@ -350,7 +515,7 @@ async def logout(session: SessionDep, token: str = Depends(oauth2_scheme)):
     Отзывает текущий токен доступа.
     """
     async with session.begin():
-    # проверяем валидность токена
+        # проверяем валидность токена
         payload = await verify_token(token, session)
         jti = payload['jti']
 
@@ -572,8 +737,40 @@ def require_permission(permission_code: str):
     """
     Создаёт зависимость для проверки конкретного разрешения
     """
-    async def permission_dependency(session: SessionDep,
-                                    current_user: UserModel = Depends(get_current_user)):
+    async def permission_dependency(session: SessionDep, current_user: UserModel = Depends(get_current_user)):
         return await check_permission(permission_code, session, current_user)
 
     return permission_dependency
+
+
+@router.post('/2fa/toggle', response_model=dict)
+async def toggle_2fa(
+    session: SessionDep,
+    enabled: bool = Body(...),
+    password: str = Body(...),
+    current_user: UserModel = Depends(get_current_user)
+):
+    """
+    Включение/отключение 2FA
+    """
+    async with session.begin_nested():
+        if not verify_password(password, current_user.hashed_password):
+            raise HTTPException(status_code=400, detail="Неверный пароль")
+
+        old_value = {"is_2fa_enabled": current_user.is_2fa_enabled}
+        current_user.is_2fa_enabled = enabled
+        new_value = {"is_2fa_enabled": enabled}
+
+        await log_mutation(
+            session=session,
+            entity_type='user',
+            entity_id=current_user.id,
+            operation='update',
+            old_value=old_value,
+            new_value=new_value,
+            user_id=current_user.id
+        )
+    await session.flush()
+
+    return {"message": f"2FA {'включена' if enabled else 'отключена'}"}
+
