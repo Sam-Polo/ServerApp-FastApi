@@ -321,6 +321,7 @@ class TemporaryTokenModel(Base):
     token: Mapped[str] = mapped_column(String(256), unique=True, nullable=False)
     expires_at: Mapped[datetime] = mapped_column(nullable=False)
     is_used: Mapped[bool] = mapped_column(default=False)
+    is_verified: Mapped[bool] = mapped_column(default=False)
 
 
 class TwoFactorCodeModel(Base):

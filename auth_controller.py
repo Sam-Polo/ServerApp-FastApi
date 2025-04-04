@@ -167,8 +167,8 @@ async def login(session: SessionDep, request: Request, form_data: OAuth2Password
     Маршрут для авторизации пользователя
     принимает логин и пароль, возвращает jwt-токен
     """
-    async with session.begin_nested():
-        # поиск пользователя в бд
+    async with session.begin():
+        # поиск пользователя в БД
         user = await session.execute(select(UserModel).where(UserModel.username == form_data.username))
         user = user.scalar()
 
@@ -176,7 +176,7 @@ async def login(session: SessionDep, request: Request, form_data: OAuth2Password
             raise HTTPException(status_code=400, detail='Неверное имя пользователя или пароль')
 
         if not user.is_2fa_enabled:
-            # Если 2FA выключена, выдаём полноценные токены
+            # если 2FA выключена, выдаём полноценные токены
             access_token, access_jti = create_access_token(data={'sub': user.username})
             refresh_token = create_refresh_token(data={'sub': user.username})
             await add_active_token(user.id, access_jti, session)
@@ -190,20 +190,54 @@ async def login(session: SessionDep, request: Request, form_data: OAuth2Password
                 token_type='bearer'
             )
         else:
-            # Если 2FA включена, выдаём временный токен
-            temp_token = create_temporary_token(user.id)
-            payload = jwt.decode(temp_token, SECRET_KEY, algorithms=[ALGORITHM])  # Декодируем для получения exp
-            expire = datetime.fromtimestamp(payload['exp'])  # Преобразуем exp в datetime
-            temp_token_model = TemporaryTokenModel(
-                user_id=user.id,
-                token=temp_token,
-                expires_at=expire
+            # если 2FA включена, проверяем, есть ли подтверждённый temporary_token
+            stmt = select(TemporaryTokenModel).where(
+                TemporaryTokenModel.user_id == user.id,
+                TemporaryTokenModel.is_used == False,
+                TemporaryTokenModel.is_verified == True,
+                TemporaryTokenModel.expires_at > datetime.utcnow()
             )
+            temp_token_record = (await session.execute(stmt)).scalar_one_or_none()
 
-            session.add(temp_token_model)
-            await session.flush()
-            await session.refresh(temp_token_model)
-            return {"temporary_token": temp_token, "message": "Требуется код 2FA. Запросите его через /auth/2fa/request"}
+            if temp_token_record:
+                # Если есть подтверждённый токен, выдаём access_token
+                access_token, access_jti = create_access_token(data={'sub': user.username})
+                refresh_token = create_refresh_token(data={'sub': user.username})
+                await add_active_token(user.id, access_jti, session)
+                await add_refresh_token(user.id, refresh_token, session)
+
+                # Сбрасываем флаг is_verified
+                temp_token_record.is_verified = False
+                # Или удаляем запись полностью, если она больше не нужна
+                # await session.delete(temp_token_record)
+
+                await session.flush()
+
+                return AuthResponseSchema(
+                    access_token=access_token,
+                    refresh_token=refresh_token,
+                    token_type='bearer'
+                )
+            else:
+                # Если нет подтверждённого токена, выдаём новый temporary_token
+                temp_token = create_temporary_token(user.id)
+                payload = jwt.decode(temp_token, SECRET_KEY, algorithms=[ALGORITHM])
+                expire = datetime.fromtimestamp(payload['exp'])
+                temp_token_model = TemporaryTokenModel(
+                    user_id=user.id,
+                    token=temp_token,
+                    expires_at=expire,
+                    is_used=False,
+                    is_verified=False
+                )
+
+                session.add(temp_token_model)
+                await session.flush()
+
+                return TemporaryTokenResponse(
+                    temporary_token=temp_token,
+                    message="Требуется код 2FA"
+                )
 
 
 @router.post('/2fa/generate', response_model=dict)
@@ -270,23 +304,25 @@ async def generate_2fa_code(
         return {"code": new_code}
 
 
-@router.post('/2fa/verify', response_model=AuthResponseSchema)
+@router.post('/2fa/verify', response_model=dict)
 async def verify_2fa_code(
     session: SessionDep,
     request: Request,
     temp_token: str = Body(...),
     two_factor_code: str = Body(...),
 ):
-    """Подтверждение кода 2FA и выдача полноценных токенов"""
+    """
+    Подтверждение кода 2FA и выдача полноценных токенов
+    """
     async with session.begin():
         # Проверяем временный токен
         try:
             payload = jwt.decode(temp_token, SECRET_KEY, algorithms=[ALGORITHM])
             if payload.get('type') != 'temporary':
-                raise HTTPException(status_code=400, detail="Неверный тип токена")
+                raise HTTPException(status_code=400, detail='Неверный тип токена')
             user_id = int(payload['sub'])
         except (jwt.ExpiredSignatureError, jwt.InvalidTokenError):
-            raise HTTPException(status_code=401, detail="Временный токен истёк или недействителен")
+            raise HTTPException(status_code=401, detail='Временный токен истёк или недействителен')
 
         stmt = select(TemporaryTokenModel).where(
             TemporaryTokenModel.token == temp_token,
@@ -296,7 +332,7 @@ async def verify_2fa_code(
         )
         temp_token_record = (await session.execute(stmt)).scalar_one_or_none()
         if not temp_token_record:
-            raise HTTPException(status_code=400, detail="Временный токен недействителен")
+            raise HTTPException(status_code=400, detail='Временный токен недействителен')
 
         # Проверяем 2FA-код
         user_agent_hash = hashlib.sha256(request.headers.get('User-Agent', '').encode()).hexdigest()
@@ -310,25 +346,13 @@ async def verify_2fa_code(
         code_record = (await session.execute(stmt)).scalar_one_or_none()
 
         if not code_record:
-            raise HTTPException(status_code=400, detail="Неверный или истёкший код 2FA")
+            raise HTTPException(status_code=400, detail='Неверный или истёкший код 2FA')
 
-        # Помечаем временный токен и код как использованные
-        temp_token_record.is_used = True
+        # помечаем временный токен как подтверждённый и код как использованный
+        temp_token_record.is_verified = True
         code_record.is_used = True
 
-        # Выдаём полноценные токены
-        user = await session.get(UserModel, user_id)
-        access_token, access_jti = create_access_token(data={'sub': user.username})
-        refresh_token = create_refresh_token(data={'sub': user.username})
-        await add_active_token(user.id, access_jti, session)
-        await add_refresh_token(user.id, refresh_token, session)
-        await session.commit()
-
-        return AuthResponseSchema(
-            access_token=access_token,
-            refresh_token=refresh_token,
-            token_type='bearer'
-        )
+        return {'message': '2FA код подтвержден'}
 
 
 def create_refresh_token(data: dict) -> str:
@@ -502,7 +526,7 @@ async def cleanup_expired_tokens(session: SessionDep):
     """
     Удаляет истёкшие токены из таблицы active_tokens.
     """
-    models = [ActiveTokenModel, RevokedTokenModel, RefreshTokenModel]
+    models = [ActiveTokenModel, RevokedTokenModel, RefreshTokenModel, TemporaryTokenModel]
     for model in models:
         await session.execute(delete(model).where(model.expires_at < datetime.utcnow()))
     await session.commit()
