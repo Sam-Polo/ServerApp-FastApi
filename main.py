@@ -2,12 +2,12 @@
 import asyncio
 
 from info_controller import router as info_router
-from auth_controller import router as auth_router, cleanup_expired_tokens
+from auth_controller import router as auth_router, cleanup_expired_tokens, ACCESS_TOKEN_EXPIRE_MINUTES
 from roles_controller import roles_router, logs_router
+from lb12.visits_controller import router as visits_router
 from seed import router as seed_router
 
 from db import new_session, router as db_router
-from auth_controller import ACCESS_TOKEN_EXPIRE_MINUTES
 
 import os
 
@@ -24,6 +24,7 @@ app.include_router(roles_router)
 app.include_router(logs_router)
 app.include_router(seed_router)
 app.include_router(db_router)
+app.include_router(visits_router)
 
 
 async def cleanup_expired_tokens_periodically():

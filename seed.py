@@ -119,6 +119,8 @@ async def run_seed(session: SessionDep):
          'description': 'Добавление разрешения к роли'},
         {'name': 'Восстановление из лога', 'code': 'restore-from-log',
          'description': 'Разрешение на восстановление old_value из логирования'},
+        {'name': 'Проверка посещаемости', 'code': 'check-visits',
+         'description': 'Проверка посещаемости студентов'},
     ]
     for entity in entities:
         permissions.extend([
