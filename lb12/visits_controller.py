@@ -82,7 +82,6 @@ async def check_visits(
             own_lessons = [l for l in lessons if isinstance(l.subgroups, int) and l.subgroups == subgroup or 
                           (isinstance(l.subgroups, list) and subgroup in l.subgroups)]
             total_own_lessons = len(own_lessons)
-            visited_own_lessons = sum(1 for l in own_lessons if l.visit)
 
             # все посещения (включая чужие подгруппы)
             total_visits = sum(1 for l in lessons if l.visit)
@@ -93,7 +92,7 @@ async def check_visits(
             success_labs = sum(1 for l in labs if l.visit)
 
             # расчёт процентов
-            visit_percent = (total_visits / total_own_lessons * 100) if total_own_lessons > 0 else 0
+            visit_percent = min((total_visits / total_own_lessons * 100), 100) if total_own_lessons > 0 else 0
             success_labs_percent = (success_labs / total_labs * 100) if total_labs > 0 else 0
 
             # условие зачёта: 80% посещаемости и минимум 50% лаб
