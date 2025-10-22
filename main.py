@@ -1,70 +1,46 @@
-from typing import Annotated
+# main.py:
+import asyncio
 
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+from info_controller import router as info_router
+from auth_controller import router as auth_router, cleanup_expired_tokens, ACCESS_TOKEN_EXPIRE_MINUTES
+from roles_controller import roles_router, logs_router
+from lb12.visits_controller import router as visits_router
+from seed import router as seed_router
 
-from pydantic import BaseModel
-from fastapi import FastAPI, Depends
+from db import new_session, router as db_router
+
+import os
+
+from fastapi import FastAPI
+
+os.environ["TZ"] = "Europe/Moscow"
 
 app = FastAPI()
 
-
-engine = create_async_engine('sqlite+aiosqlite:///database.db')
-
-new_session = async_sessionmaker(engine, expire_on_commit=False)
-
-
-async def get_session():
-    async with new_session() as session:
-        yield session
-
-
-SessionDep = Annotated[AsyncSession, Depends(get_session)]
+# подключаем маршруты из других файла
+app.include_router(info_router)
+app.include_router(auth_router)
+app.include_router(roles_router)
+app.include_router(logs_router)
+app.include_router(seed_router)
+app.include_router(db_router)
+app.include_router(visits_router)
 
 
-class Base(DeclarativeBase):
-    pass
+async def cleanup_expired_tokens_periodically():
+    """
+    Периодически очищает истёкшие токены каждые две минуты
+    """
+    while True:
+        async with new_session() as session:
+            await cleanup_expired_tokens(session)
+        await asyncio.sleep(ACCESS_TOKEN_EXPIRE_MINUTES * 60)  # время в сек.
 
 
-class UserModel(Base):
-    __tablename__ = "users"
+@app.on_event('startup')
+async def startup_event():
+    """
+    Запускает периодическую задачу при старте приложения.
+    """
+    _ = asyncio.create_task(cleanup_expired_tokens_periodically())
 
-    id: Mapped[int] = mapped_column(primary_key=True)
-    username: Mapped[str] = mapped_column(unique=True)
-    email: Mapped[str] = mapped_column(unique=True)
-
-
-@app.post("/setup_database", tags=['База данных'])
-async def setup_database():
-    async with engine.begin() as connection:
-        await connection.run_sync(Base.metadata.drop_all)
-        await connection.run_sync(Base.metadata.create_all)
-    return {'message': True}
-
-
-class UserAddSchema(BaseModel):
-    username: str
-    email: str
-
-
-class UserSchema(UserAddSchema):
-    id: int
-
-
-@app.post('/')
-async def add_user(data: UserAddSchema, session: SessionDep):
-    new_user = UserModel(
-        username=data.username,
-        email=data.email,
-    )
-    session.add(new_user)
-    await session.commit()
-    return {'message': True}
-
-
-@app.get('/')
-async def get_users(session: SessionDep):
-    query = select(UserModel)
-    result = await session.execute(query)
-    return result.scalars().all()

@@ -1,0 +1,337 @@
+# models.py:
+from datetime import datetime, date
+from typing import Optional, Any
+
+import json
+
+from pydantic import BaseModel, ConfigDict
+import sqlalchemy
+from sqlalchemy import String, Integer, Date, ForeignKey, DateTime, Table, Column
+from sqlalchemy.orm import Mapped, mapped_column, relationship
+
+from db import Base
+
+
+class ServerInfoSchema(BaseModel):
+    python_version: str
+    platform: str
+    architecture: list | tuple
+    processor: str
+
+
+class ClientInfoSchema(BaseModel):
+    client_ip: str
+    user_agent: str
+
+
+class DatabaseInfoSchema(BaseModel):
+    database_type: str
+
+
+class AuthRequestSchema(BaseModel):
+    username: str
+    password: str  # пароль пользователя
+
+    def to_response(self, token: str, refresh_token: str, ttype: str) -> 'AuthResponseSchema':
+        return AuthResponseSchema(access_token=token, refresh_token=refresh_token, token_type=ttype)
+
+class RegisterRequestSchema(BaseModel):
+    username: str
+    password: str
+    c_password: str  # подтверждение пароля
+    email: str
+    birthday: date
+
+    def to_response(self) -> 'RegisterResponseSchema':
+        return RegisterResponseSchema(username=self.username, message='Регистрация успешна')
+
+
+class AuthResponseSchema(BaseModel):
+    access_token: str  # токен доступа
+    refresh_token: str  # токен обновления
+    token_type: str  # тип токена (по умолчанию bearer)
+
+
+class TemporaryTokenResponse(BaseModel):
+    temporary_token: str
+    message: str
+
+
+class RegisterResponseSchema(BaseModel):
+    username: str
+    message: str  # сообщение об успешной регистрации
+
+
+class UserResponseSchema(BaseModel):
+    id: int
+    username: str
+    email: str
+    birthday: date
+    role_ids: list[int]
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class UserCollectionSchema(BaseModel):
+    users: list[UserResponseSchema]
+
+
+class PermissionSchema(BaseModel):
+    id: int
+    name: str
+    code: str
+    description: str | None
+    created_at: datetime
+    created_by: int
+
+    class Config:
+        from_attributes = True
+
+
+class CreatePermissionRequestSchema(BaseModel):
+    name: str
+    code: str
+    description: str | None = None
+
+    def to_response(self, permission: 'PermissionModel') -> PermissionSchema:
+        return PermissionSchema.model_validate(permission)
+
+
+class PermissionCollectionSchema(BaseModel):
+    permissions: list[PermissionSchema]
+
+
+class RoleSchema(BaseModel):
+    id: int
+    name: str
+    description: str | None
+    code: str
+    created_at: datetime
+    created_by: int
+    deleted_at: datetime | None = None
+    deleted_by: Optional[int] = None
+    permissions: list[PermissionSchema] = []
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class RoleCollectionSchema(BaseModel):
+    roles: list[RoleSchema]
+
+
+class CreateRoleRequestSchema(BaseModel):
+    name: str
+    description: str | None = None
+    code: str
+
+    def to_response(self, role: 'RoleModel') -> RoleSchema:
+        return RoleSchema.model_validate(role)
+
+
+class UpdateRoleRequestSchema(BaseModel):
+    """Схема запроса обновления роли"""
+    name: str | None = None
+    description: str | None = None
+    code: str | None = None
+
+    def to_response(self, role: 'RoleModel') -> 'RoleSchema':
+        """Преобразование запроса в схему ответа"""
+        return RoleSchema(
+            id=role.id,
+            name=self.name if self.name is not None else role.name,
+            description=self.description if self.description is not None else role.description,
+            code=self.code if self.code is not None else role.code,
+            created_at=role.created_at,
+            created_by=role.created_by,
+            deleted_at=role.deleted_at,
+            deleted_by=role.deleted_by,
+            permissions=[PermissionSchema.model_validate(p) for p in role.permissions],
+        )
+
+
+class AssignRoleRequestSchema(BaseModel):
+    role_id: int
+
+
+class ChangeLogSchema(BaseModel):
+    id: int
+    entity_type: str
+    entity_id: int
+    operation: str
+    old_value: Optional[str] = None
+    new_value: Optional[str] = None
+    created_at: datetime
+    created_by: int
+    diff: Optional[dict] = None
+
+    model_config = ConfigDict(from_attributes=True)
+
+    @classmethod
+    def model_validate(cls, obj: Any, *, strict: bool | None = None, from_attributes: bool | None = None,
+                       context: dict[str, Any] | None = None):
+        # Вызываем базовый метод для создания экземпляра
+        instance = super().model_validate(obj, strict=strict, from_attributes=from_attributes, context=context)
+
+        # Вычисляем различия между old_value и new_value
+        try:
+            old_dict = json.loads(instance.old_value) if instance.old_value else {}
+            new_dict = json.loads(instance.new_value) if instance.new_value else {}
+            instance.diff = {
+                key: {'old': old_dict.get(key), 'new': new_dict.get(key)}
+                for key in set(old_dict.keys()) | set(new_dict.keys())
+                if old_dict.get(key) != new_dict.get(key)
+            }
+        except json.JSONDecodeError:
+            instance.diff = None  # Если JSON невалиден, оставляем diff как None
+        return instance
+
+
+class ChangeLogCollectionSchema(BaseModel):
+    logs: list[ChangeLogSchema]
+
+
+#####################################
+"""            DB TABLES          """
+#####################################
+
+
+user_roles = Table(
+    'user_roles',
+    Base.metadata,
+    Column('user_id', Integer, ForeignKey('users.id'), primary_key=True),
+    Column('role_id', Integer, ForeignKey('roles.id'), primary_key=True),
+)
+
+
+class UserModel(Base):
+    __tablename__ = 'users'
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    username: Mapped[str] = mapped_column(String(32), unique=True)
+    email: Mapped[str] = mapped_column(String(64), unique=True)
+    hashed_password: Mapped[str] = mapped_column(String(256), nullable=False)
+    birthday: Mapped[date] = mapped_column(Date)
+    is_2fa_enabled: Mapped[bool] = mapped_column(default=False)
+
+    # отношение к роли
+    roles = relationship('RoleModel', secondary=user_roles, back_populates='users')
+
+    def __repr__(self) -> str:
+        return f'<UserModel(id={self.id}, username={self.username!r})>'
+
+
+class ActiveTokenModel(Base):
+    __tablename__ = 'active_tokens'
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey('users.id'), nullable=False)
+    jti: Mapped[str] = mapped_column(String, unique=True, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(default=datetime.utcnow)
+    expires_at: Mapped[datetime] = mapped_column(nullable=False)
+
+
+class RevokedTokenModel(Base):
+    __tablename__ = 'revoked_tokens'
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    jti: Mapped[str] = mapped_column(String, unique=True, nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(nullable=False)
+
+
+class RefreshTokenModel(Base):
+    __tablename__ = 'refresh_tokens'
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey('users.id'), nullable=False)
+    token_hash: Mapped[str] = mapped_column(String, unique=True, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(default=datetime.utcnow)
+    expires_at: Mapped[datetime] = mapped_column(nullable=False)
+
+
+class RoleModel(Base):
+    __tablename__ = 'roles'
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String, nullable=False, unique=True)
+    description: Mapped[str | None] = mapped_column(String, nullable=True)
+    code: Mapped[str] = mapped_column(String, nullable=False, unique=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, server_default=sqlalchemy.func.now())
+    created_by: Mapped[int] = mapped_column(Integer, ForeignKey('users.id', use_alter=True), nullable=True)
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    deleted_by: Mapped[int | None] = mapped_column(Integer, ForeignKey('users.id', use_alter=True), nullable=True)
+
+    users = relationship('UserModel', secondary=user_roles, back_populates='roles')
+    permissions = relationship('PermissionModel',
+                               secondary='role_permissions',
+                               back_populates='roles')
+
+    def __repr__(self) -> str:
+        return f'<RoleModel(id={self.id}, name={self.name!r})>'
+
+
+class PermissionModel(Base):
+    __tablename__ = 'permissions'
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String, nullable=False, unique=True)
+    code: Mapped[str] = mapped_column(String, nullable=False, unique=True)
+    description: Mapped[str | None] = mapped_column(String, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, server_default=sqlalchemy.func.now())
+    created_by: Mapped[int] = mapped_column(Integer, ForeignKey('users.id'), nullable=False)
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    deleted_by: Mapped[int | None] = mapped_column(Integer, ForeignKey('users.id'), nullable=True)
+
+    # связь с ролями через таблицу role_permissions
+    roles = relationship('RoleModel',
+                         secondary='role_permissions',
+                         back_populates='permissions')
+
+    def __repr__(self) -> str:
+        return f'<PermissionModel(id={self.id}, code={self.code!r})>'
+
+
+class RolePermissionModel(Base):
+    __tablename__ = 'role_permissions'
+
+    role_id: Mapped[int] = mapped_column(Integer, ForeignKey('roles.id'), primary_key=True)
+    permission_id: Mapped[int] = mapped_column(Integer, ForeignKey('permissions.id'), primary_key=True)
+
+
+class ChangeLogModel(Base):
+    __tablename__ = 'change_logs'
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    entity_type: Mapped[str] = mapped_column(String, nullable=False)  # user / role / permission
+    entity_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    operation: Mapped[str] = mapped_column(String, nullable=False)   # create / update / delete
+    old_value: Mapped[Optional[str]] = mapped_column(String, nullable=True)  # до
+    new_value: Mapped[Optional[str]] = mapped_column(String, nullable=True)  # после
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
+    created_by: Mapped[int] = mapped_column(Integer, ForeignKey('users.id'), nullable=False)
+
+    def __repr__(self) -> str:
+        return f'<ChangeLogModel(id={self.id}, entity_type={self.entity_type!r}, operation={self.operation!r})>'
+
+
+class TemporaryTokenModel(Base):
+    __tablename__ = 'temporary_tokens'
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey('users.id'), nullable=False)
+    token: Mapped[str] = mapped_column(String(256), unique=True, nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(nullable=False)
+    is_used: Mapped[bool] = mapped_column(default=False)
+    is_verified: Mapped[bool] = mapped_column(default=False)
+
+
+class TwoFactorCodeModel(Base):
+    __tablename__ = 'two_factor_codes'
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey('users.id'), nullable=False)
+    code: Mapped[str] = mapped_column(String(6), nullable=False)
+    user_agent_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(default=datetime.utcnow)
+    expires_at: Mapped[datetime] = mapped_column(nullable=False)
+    is_used: Mapped[bool] = mapped_column(default=False)
+    request_count: Mapped[int] = mapped_column(default=0)
