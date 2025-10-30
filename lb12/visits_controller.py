@@ -79,8 +79,8 @@ async def check_visits(
             subgroup = data['subgroup']
 
             # собственные занятия студента (где его подгруппа совпадает)
-            own_lessons = [l for l in lessons if isinstance(l.subgroups, int) and l.subgroups == subgroup or 
-                          (isinstance(l.subgroups, list) and subgroup in l.subgroups)]
+            own_lessons = [l for l in lessons if isinstance(l.subgroups, int) and l.subgroups == subgroup
+                           or (isinstance(l.subgroups, list) and subgroup in l.subgroups)]
             total_own_lessons = len(own_lessons)
 
             # все посещения (включая чужие подгруппы)
